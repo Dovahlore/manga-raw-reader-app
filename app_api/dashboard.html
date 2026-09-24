@@ -129,7 +129,7 @@ function render(d) {
   if (users.length) b3 += `<h3>所有用户</h3>` + table(['用户 ID','Token','翻页数','创建','最后活跃'], users.map(u =>
     `<tr><td class="mono">${esc(u.id)}</td><td class="mono">${fmtTok(u.token_used)}</td><td class="mono">${fmtTok(u.page_count)}</td><td class="mono">${String(u.created_at||'').slice(0,10)}</td><td class="mono">${String(u.last_active_at||'').slice(0,16)}</td></tr>`));
   const books = um.books || [];
-  if (books.length) b3 += `<h3>每本书</h3>` + table(['书名','状态','页数','已翻','失败','Token'], books.map(b =>
+  if (books.length) b3 += `<h3>每本书</h3>` + table(['书名','状态','总页数','已翻','失败','Token'], books.map(b =>
     `<tr><td>${esc(b.title)}</td><td>${b.synced?'<span class="pill synced">已同步</span>':'<span class="pill local">本地</span>'}</td><td class="mono">${b.pages||0}</td><td class="mono ok">${b.done_pages||0}</td><td class="mono bad">${b.failed_pages||0}</td><td class="mono">${fmtTok(b.tokens)}</td></tr>`));
 
   document.getElementById('root').innerHTML =

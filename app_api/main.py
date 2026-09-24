@@ -675,8 +675,8 @@ async def admin_overview():
         "FROM users ORDER BY token_used DESC")
     books = await run_in_threadpool(
         db.query,
-        "SELECT b.owner, b.title, b.page_count AS total_pages, b.zip_path IS NOT NULL AS synced, "
-        "COUNT(p.id) AS pages, COALESCE(SUM(p.status='done'),0) AS done_pages, "
+        "SELECT b.owner, b.title, COALESCE(b.page_count, 0) AS pages, b.zip_path IS NOT NULL AS synced, "
+        "COALESCE(SUM(p.status='done'),0) AS done_pages, "
         "COALESCE(SUM(p.status='failed'),0) AS failed_pages, COALESCE(SUM(p.tokens),0) AS tokens "
         "FROM books b LEFT JOIN pages p ON p.book_id=b.id "
         "GROUP BY b.id, b.owner, b.title, b.page_count, b.zip_path ORDER BY tokens DESC")
