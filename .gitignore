@@ -77,4 +77,4 @@ secret.env
 /test/*.zip
 
 # 自愈守护日志
-/scripts/healthdog.log
+/ops/healthdog.log
