@@ -614,38 +614,75 @@ async def usage(owner: str = Depends(get_owner)):
 
 @app.get("/v1/admin/overview", dependencies=[Depends(auth)])
 async def admin_overview():
-    """管理平台总览：所有用户消耗 + 全局统计 + 每本书 + healthdog 操作日志（管理员专用）。"""
-    users = await run_in_threadpool(
+    """管理平台三模块：后端执行记录 + healthdog + 用户记录（管理员专用）。"""
+    # ---- 模块一：后端执行记录（引擎健康 + 最近任务 + 最近翻译页）----
+    engine_ok, queue_size = False, None
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(f"{S.ENGINE_URL}/queue-size")
+            engine_ok = r.status_code == 200
+            if engine_ok:
+                queue_size = r.json()
+    except Exception:      # noqa: BLE001
+        queue_size = None
+    db_ok = await run_in_threadpool(db.ping)
+    redis_ok = False
+    try:
+        redis_ok = bool(_redis and await _redis.ping())
+    except Exception:      # noqa: BLE001
+        redis_ok = False
+    jobs = await run_in_threadpool(
         db.query,
-        "SELECT id, name, token_used, page_count, created_at, last_active_at "
-        "FROM users ORDER BY token_used DESC")
-    stats = await run_in_threadpool(
-        db.query_one,
-        "SELECT (SELECT COUNT(*) FROM books) AS books, "
-        "(SELECT COUNT(*) FROM pages) AS pages, "
-        "(SELECT COALESCE(SUM(status='done'),0) FROM pages) AS done_pages, "
-        "(SELECT COALESCE(SUM(status='failed'),0) FROM pages) AS failed_pages, "
-        "(SELECT COALESCE(SUM(token_used),0) FROM users) AS tokens")
-    books = await run_in_threadpool(
+        "SELECT j.action, j.status, j.book_id, b.title, j.queued_at, j.finished_at, j.error "
+        "FROM jobs j LEFT JOIN books b ON b.id=j.book_id "
+        "ORDER BY j.queued_at DESC LIMIT 100")
+    pages = await run_in_threadpool(
         db.query,
-        "SELECT b.title, b.page_count AS total_pages, b.zip_path IS NOT NULL AS synced, "
-        "COUNT(p.id) AS pages, COALESCE(SUM(p.status='done'),0) AS done_pages, "
-        "COALESCE(SUM(p.status='failed'),0) AS failed_pages, COALESCE(SUM(p.tokens),0) AS tokens "
-        "FROM books b LEFT JOIN pages p ON p.book_id=b.id "
-        "GROUP BY b.id, b.title, b.page_count, b.zip_path ORDER BY tokens DESC")
+        "SELECT b.title, p.page_index, p.status, p.tokens, p.elapsed_ms, p.updated_at "
+        "FROM pages p LEFT JOIN books b ON b.id=p.book_id "
+        "ORDER BY p.updated_at DESC LIMIT 200")
+    backend = {
+        "engine": {"ok": engine_ok, "queue_size": queue_size, "db_ok": db_ok, "redis_ok": redis_ok},
+        "jobs": jobs,
+        "pages": pages,
+    }
+
+    # ---- 模块二：healthdog（操作日志 + token 快照）----
     log_path = S.DATA_DIR / "healthdog.log"
     lines = []
     if log_path.exists():
         lines = await run_in_threadpool(
             lambda: log_path.read_text(encoding="utf-8", errors="ignore").splitlines())
-    # 从日志解析 token 快照（healthdog 每天记的 "token usage: token_used=... pages=..."）
     token_history = []
     for line in lines:
         m = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*token_used=(\d+)\s+pages=(\d+)', line)
         if m:
             token_history.append({"time": m.group(1), "token_used": int(m.group(2)), "pages": int(m.group(3))})
-    return {"stats": stats or {}, "users": users, "books": books,
-            "token_history": token_history, "ops_log": lines[-1000:]}
+    healthdog = {"ops_log": lines[-1000:], "token_history": token_history}
+
+    # ---- 模块三：用户记录（每个用户 + 每本书 + 全局统计）----
+    users = await run_in_threadpool(
+        db.query,
+        "SELECT id, name, token_used, page_count, created_at, last_active_at "
+        "FROM users ORDER BY token_used DESC")
+    books = await run_in_threadpool(
+        db.query,
+        "SELECT b.owner, b.title, b.page_count AS total_pages, b.zip_path IS NOT NULL AS synced, "
+        "COUNT(p.id) AS pages, COALESCE(SUM(p.status='done'),0) AS done_pages, "
+        "COALESCE(SUM(p.status='failed'),0) AS failed_pages, COALESCE(SUM(p.tokens),0) AS tokens "
+        "FROM books b LEFT JOIN pages p ON p.book_id=b.id "
+        "GROUP BY b.id, b.owner, b.title, b.page_count, b.zip_path ORDER BY tokens DESC")
+    stats = await run_in_threadpool(
+        db.query_one,
+        "SELECT (SELECT COUNT(*) FROM users) AS users, "
+        "(SELECT COUNT(*) FROM books) AS books, "
+        "(SELECT COUNT(*) FROM pages) AS pages, "
+        "(SELECT COALESCE(SUM(status='done'),0) FROM pages) AS done_pages, "
+        "(SELECT COALESCE(SUM(status='failed'),0) FROM pages) AS failed_pages, "
+        "(SELECT COALESCE(SUM(token_used),0) FROM users) AS tokens")
+    users_mod = {"users": users, "books": books, "stats": stats or {}}
+
+    return {"backend": backend, "healthdog": healthdog, "users": users_mod}
 
 
 @app.get("/dashboard", include_in_schema=False)

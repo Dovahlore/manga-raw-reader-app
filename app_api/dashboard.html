@@ -14,27 +14,28 @@
   input { padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px; width: 340px; max-width: 100%; font-size: 14px; }
   button { padding: 8px 16px; border: 0; border-radius: 6px; background: #2563eb; color: #fff; font-size: 14px; cursor: pointer; }
   button:hover { background: #1d4ed8; }
-  .cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
-  .card { flex: 1 1 150px; background: #fff; border-radius: 10px; padding: 14px 16px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
-  @media (prefers-color-scheme: dark) { .card { background: #1e1e24; } }
+  .module { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 20px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+  @media (prefers-color-scheme: dark) { .module { background: #1a1a20; } }
+  .module h2 { margin: 0 0 12px; font-size: 16px; border-left: 4px solid #2563eb; padding-left: 8px; }
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .card { flex: 1 1 140px; background: #fafafa; border-radius: 10px; padding: 12px 14px; }
+  @media (prefers-color-scheme: dark) { .card { background: #24242a; } }
   .card .k { font-size: 12px; color: #888; }
-  .card .v { font-size: 22px; font-weight: 600; margin-top: 4px; }
-  h2 { font-size: 15px; margin: 20px 0 8px; }
-  table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 10px; overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
-  @media (prefers-color-scheme: dark) { table { background: #1e1e24; } }
-  th, td { text-align: left; padding: 8px 10px; font-size: 13px; border-bottom: 1px solid #eee; }
+  .card .v { font-size: 20px; font-weight: 600; margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  th, td { text-align: left; padding: 7px 9px; font-size: 13px; border-bottom: 1px solid #eee; }
   @media (prefers-color-scheme: dark) { th, td { border-bottom: 1px solid #2a2a30; } }
   th { background: #fafafa; color: #666; font-weight: 500; }
   @media (prefers-color-scheme: dark) { th { background: #26262c; color: #aaa; } }
   .mono { font-variant-numeric: tabular-nums; }
-  .ok { color: #16a34a; } .bad { color: #dc2626; }
-  .logbox { background: #101014; color: #d0d0d0; font-family: ui-monospace, Consolas, monospace; font-size: 12px; padding: 12px; border-radius: 10px; max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+  .ok { color: #16a34a; } .bad { color: #dc2626; } .warn { color: #d97706; }
+  .pill { display:inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; }
+  .pill.on { background: #dcfce7; color: #16a34a; } .pill.off { background: #fee2e2; color: #dc2626; }
+  .pill.synced { background: #dbeafe; color: #1d4ed8; } .pill.local { background: #f3f4f6; color: #6b7280; }
+  @media (prefers-color-scheme: dark) { .pill.on { background: #123b24; color: #4ade80; } .pill.off { background: #3b1212; color: #f87171; } .pill.synced { background: #1e3a5f; color: #93c5fd; } .pill.local { background: #2a2a30; color: #9ca3af; } }
+  .logbox { background: #101014; color: #d0d0d0; font-family: ui-monospace, Consolas, monospace; font-size: 12px; padding: 12px; border-radius: 8px; max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
   .hint { font-size: 12px; color: #999; margin-top: 4px; }
   .err { color: #dc2626; font-size: 13px; margin-top: 8px; }
-  .pill { display:inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; }
-  .pill.synced { background: #dbeafe; color: #1d4ed8; }
-  .pill.local { background: #f3f4f6; color: #6b7280; }
-  @media (prefers-color-scheme: dark) { .pill.synced { background: #1e3a5f; color: #93c5fd; } .pill.local { background: #2a2a30; color: #9ca3af; } }
 </style>
 </head>
 <body>
@@ -45,28 +46,7 @@
   <span class="hint">Token 只存你浏览器本地</span>
 </div>
 <div id="err" class="err"></div>
-
-<div class="cards" id="cards" style="display:none"></div>
-
-<div id="users" style="display:none">
-  <h2>所有用户消耗</h2>
-  <table><thead><tr><th>用户 ID</th><th>Token 消耗</th><th>翻页数</th><th>最后活跃</th></tr></thead><tbody id="usersBody"></tbody></table>
-</div>
-
-<div id="books" style="display:none">
-  <h2>书库总览</h2>
-  <table><thead><tr><th>书名</th><th>状态</th><th>页数</th><th>已翻</th><th>失败</th><th>Token</th></tr></thead><tbody id="booksBody"></tbody></table>
-</div>
-
-<div id="tokenHist" style="display:none">
-  <h2>healthdog Token 消耗快照（每 24h 记一次）</h2>
-  <table><thead><tr><th>时间</th><th>累计 Token</th><th>累计翻页数</th></tr></thead><tbody id="tokenHistBody"></tbody></table>
-</div>
-
-<div id="log" style="display:none">
-  <h2>healthdog 操作日志</h2>
-  <div class="logbox" id="logBox"></div>
-</div>
+<div id="root"></div>
 
 <script>
 const tokenInput = document.getElementById('token');
@@ -76,6 +56,8 @@ tokenInput.oninput = () => localStorage.setItem('mit_token', tokenInput.value);
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function fmtTok(n) { n = Number(n)||0; return n >= 1000000 ? (n/1000000).toFixed(2)+'M' : n >= 1000 ? (n/1000).toFixed(1)+'K' : String(n); }
 function card(k, v) { return `<div class="card"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`; }
+function pill(on, onTxt, offTxt) { return on ? `<span class="pill on">${onTxt}</span>` : `<span class="pill off">${offTxt}</span>`; }
+function table(head, rows) { return `<table><thead><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`; }
 
 async function load() {
   const token = tokenInput.value.trim();
@@ -90,46 +72,62 @@ async function load() {
 }
 
 function render(d) {
-  const s = d.stats || {};
-  const cards = document.getElementById('cards');
-  cards.style.display = 'flex';
-  cards.innerHTML =
-    card('总 Token', fmtTok(s.tokens)) +
-    card('总翻页数', fmtTok(s.pages)) +
-    card('已完成页', fmtTok(s.done_pages)) +
-    card('失败页', fmtTok(s.failed_pages)) +
-    card('书数', fmtTok(s.books));
+  // ---- 模块一：后端执行记录 ----
+  const be = d.backend || {};
+  const eng = be.engine || {};
+  const q = eng.queue_size;
+  const queueTxt = (q && typeof q === 'object') ? (q.queue_size != null ? q.queue_size : JSON.stringify(q)) : (q != null ? q : '-');
+  let b1 = `<div class="module"><h2>① 后端执行记录</h2>
+    <div class="cards">
+      ${card('引擎', pill(eng.ok, '在线', '离线'))}
+      ${card('数据库', pill(eng.db_ok, '正常', '异常'))}
+      ${card('Redis', pill(eng.redis_ok, '正常', '异常'))}
+      ${card('引擎队列', esc(queueTxt))}
+    </div>`;
 
-  const users = d.users || [];
-  if (users.length) {
-    document.getElementById('users').style.display = 'block';
-    document.getElementById('usersBody').innerHTML = users.map(u =>
-      `<tr><td class="mono">${esc(u.id)}</td><td class="mono">${fmtTok(u.token_used)}</td><td class="mono">${fmtTok(u.page_count)}</td><td class="mono">${String(u.last_active_at||'').slice(0,16)}</td></tr>`
-    ).join('');
-  }
+  const jobs = be.jobs || [];
+  if (jobs.length) b1 += `<h3 style="font-size:13px;margin:10px 0 4px">最近任务</h3>` + table(
+    ['动作','状态','书','排队时间','完成时间'], jobs.map(j =>
+      `<tr><td class="mono">${esc(j.action)}</td><td>${j.status==='done'?'<span class="ok">done</span>':j.status==='failed'?'<span class="bad">failed</span>':`<span class="warn">${esc(j.status)}</span>`}</td><td>${esc(j.title||j.book_id)}</td><td class="mono">${String(j.queued_at||'').slice(0,16)}</td><td class="mono">${String(j.finished_at||'').slice(0,16)}</td></tr>`));
 
-  const books = d.books || [];
-  if (books.length) {
-    document.getElementById('books').style.display = 'block';
-    document.getElementById('booksBody').innerHTML = books.map(b => {
-      const pill = b.synced ? '<span class="pill synced">已同步</span>' : '<span class="pill local">本地</span>';
-      return `<tr><td>${esc(b.title)}</td><td>${pill}</td><td class="mono">${b.pages||0}</td><td class="mono ok">${b.done_pages||0}</td><td class="mono bad">${b.failed_pages||0}</td><td class="mono">${fmtTok(b.tokens)}</td></tr>`;
-    }).join('');
-  }
+  const pages = be.pages || [];
+  if (pages.length) b1 += `<h3 style="font-size:13px;margin:10px 0 4px">最近翻译页</h3>` + table(
+    ['书','页','状态','Token','耗时(ms)','时间'], pages.map(p =>
+      `<tr><td>${esc(p.title)}</td><td class="mono">${(p.page_index??0)+1}</td><td>${p.status==='done'?'<span class="ok">done</span>':p.status==='failed'?'<span class="bad">failed</span>':`<span class="warn">${esc(p.status)}</span>`}</td><td class="mono">${fmtTok(p.tokens)}</td><td class="mono">${p.elapsed_ms||0}</td><td class="mono">${String(p.updated_at||'').slice(0,16)}</td></tr>`));
+  b1 += `</div>`;
 
-  const th = d.token_history || [];
-  if (th.length) {
-    document.getElementById('tokenHist').style.display = 'block';
-    document.getElementById('tokenHistBody').innerHTML = th.slice().reverse().map(t =>
-      `<tr><td class="mono">${esc(t.time)}</td><td class="mono">${fmtTok(t.token_used)}</td><td class="mono">${fmtTok(t.pages)}</td></tr>`
-    ).join('');
-  }
+  // ---- 模块二：healthdog ----
+  const hd = d.healthdog || {};
+  const th = hd.token_history || [];
+  let b2 = `<div class="module"><h2>② healthdog 自愈守护</h2>`;
+  if (th.length) b2 += table(['快照时间','累计 Token','累计翻页数'], th.slice().reverse().map(t =>
+    `<tr><td class="mono">${esc(t.time)}</td><td class="mono">${fmtTok(t.token_used)}</td><td class="mono">${fmtTok(t.pages)}</td></tr>`));
+  const ops = hd.ops_log || [];
+  b2 += `<h3 style="font-size:13px;margin:10px 0 4px">操作日志（${ops.length} 行）</h3><div class="logbox">${esc(ops.join('\n'))||'(空)'}</div></div>`;
 
-  const lines = d.ops_log || [];
-  if (lines.length) {
-    document.getElementById('log').style.display = 'block';
-    document.getElementById('logBox').textContent = lines.join('\n');
-  }
+  // ---- 模块三：用户记录 ----
+  const um = d.users || {};
+  const st = um.stats || {};
+  let b3 = `<div class="module"><h2>③ 用户记录</h2>
+    <div class="cards">
+      ${card('用户数', fmtTok(st.users))}
+      ${card('总 Token', fmtTok(st.tokens))}
+      ${card('书数', fmtTok(st.books))}
+      ${card('总页数', fmtTok(st.pages))}
+      ${card('已完成页', fmtTok(st.done_pages))}
+      ${card('失败页', fmtTok(st.failed_pages))}
+    </div>`;
+  const users = um.users || [];
+  if (users.length) b3 += `<h3 style="font-size:13px;margin:10px 0 4px">所有用户</h3>` + table(
+    ['用户 ID','Token','翻页数','创建','最后活跃'], users.map(u =>
+      `<tr><td class="mono">${esc(u.id)}</td><td class="mono">${fmtTok(u.token_used)}</td><td class="mono">${fmtTok(u.page_count)}</td><td class="mono">${String(u.created_at||'').slice(0,10)}</td><td class="mono">${String(u.last_active_at||'').slice(0,16)}</td></tr>`));
+  const books = um.books || [];
+  if (books.length) b3 += `<h3 style="font-size:13px;margin:10px 0 4px">每本书</h3>` + table(
+    ['书名','状态','页数','已翻','失败','Token'], books.map(b =>
+      `<tr><td>${esc(b.title)}</td><td>${b.synced?'<span class="pill synced">已同步</span>':'<span class="pill local">本地</span>'}</td><td class="mono">${b.pages||0}</td><td class="mono ok">${b.done_pages||0}</td><td class="mono bad">${b.failed_pages||0}</td><td class="mono">${fmtTok(b.tokens)}</td></tr>`));
+  b3 += `</div>`;
+
+  document.getElementById('root').innerHTML = b1 + b2 + b3;
 }
 
 if (tokenInput.value) load();
