@@ -56,7 +56,7 @@
 <div id="err" class="err"></div>
 <div class="tabs" id="tabs" style="display:none">
   <button class="tab active" id="tabBtn0" onclick="switchTab(0)">① 后端执行</button>
-  <button class="tab" id="tabBtn1" onclick="switchTab(1)">② healthdog</button>
+  <button class="tab" id="tabBtn1" onclick="switchTab(1)">② dog（agent）</button>
   <button class="tab" id="tabBtn2" onclick="switchTab(2)">③ 用户记录</button>
 </div>
 <div class="content" id="root"></div>
@@ -105,12 +105,15 @@ function render(d) {
   if (pages.length) b1 += `<h3>最近翻译页</h3>` + table(['书','页','状态','Token','耗时(ms)','时间'], pages.map(p =>
     `<tr><td>${esc(p.title)}</td><td class="mono">${(p.page_index??0)+1}</td><td>${statusBadge(p.status)}</td><td class="mono">${fmtTok(p.tokens)}</td><td class="mono">${p.elapsed_ms||0}</td><td class="mono">${String(p.updated_at||'').slice(0,16)}</td></tr>`));
 
-  // 模块二：healthdog
-  const hd = d.healthdog || {}, th = hd.token_history || [];
-  let b2 = th.length ? table(['快照时间','累计 Token','累计翻页数'], th.slice().reverse().map(t =>
-    `<tr><td class="mono">${esc(t.time)}</td><td class="mono">${fmtTok(t.token_used)}</td><td class="mono">${fmtTok(t.pages)}</td></tr>`)) : '<p style="color:#999">暂无快照</p>';
-  const ops = hd.ops_log || [];
-  b2 += `<h3>操作日志（${ops.length} 行）</h3><div class="logbox">${esc(ops.join('\n'))||'(空)'}</div>`;
+  // 模块二：dog（agent）
+  const dog = d.dog || {};
+  const at = dog.agent_token || [];
+  let b2 = at.length ? table(['时间','agent 消耗'], at.slice().reverse().map(t =>
+    `<tr><td class="mono">${esc(t.time)}</td><td class="mono">${esc(t.usage)}</td></tr>`)) : '<p style="color:#999">暂无 agent 消耗记录</p>';
+  const alog = dog.agent_log || [];
+  b2 += `<h3>agent 操作日志（${alog.length} 行）</h3><div class="logbox">${esc(alog.join('\n'))||'(空)'}</div>`;
+  const wlog = dog.watchdog_log || [];
+  b2 += `<h3>自愈守护日志（${wlog.length} 行）</h3><div class="logbox">${esc(wlog.join('\n'))||'(空)'}</div>`;
 
   // 模块三：用户记录
   const um = d.users || {}, st = um.stats || {};
