@@ -7,46 +7,59 @@
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
-  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 0; padding: 16px; background: #f5f6f8; color: #1c1c1e; }
+  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 0; padding: 0; background: #f5f6f8; color: #1c1c1e; }
   @media (prefers-color-scheme: dark) { body { background: #101014; color: #e8e8ea; } }
-  h1 { font-size: 20px; margin: 8px 0 16px; }
-  .bar { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
-  input { padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px; width: 340px; max-width: 100%; font-size: 14px; }
-  button { padding: 8px 16px; border: 0; border-radius: 6px; background: #2563eb; color: #fff; font-size: 14px; cursor: pointer; }
-  button:hover { background: #1d4ed8; }
-  .module { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 20px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
-  @media (prefers-color-scheme: dark) { .module { background: #1a1a20; } }
-  .module h2 { margin: 0 0 12px; font-size: 16px; border-left: 4px solid #2563eb; padding-left: 8px; }
-  .cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
-  .card { flex: 1 1 140px; background: #fafafa; border-radius: 10px; padding: 12px 14px; }
-  @media (prefers-color-scheme: dark) { .card { background: #24242a; } }
+  .header { display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #fff; border-bottom: 1px solid #eee; position: sticky; top: 0; z-index: 10; }
+  @media (prefers-color-scheme: dark) { .header { background: #18181d; border-color: #2a2a30; } }
+  .header h1 { font-size: 18px; margin: 0; white-space: nowrap; }
+  .header input { flex: 1; max-width: 340px; padding: 7px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; }
+  .header button { padding: 7px 16px; border: 0; border-radius: 6px; background: #2563eb; color: #fff; font-size: 13px; cursor: pointer; }
+  .header button:hover { background: #1d4ed8; }
+  .tabs { display: flex; gap: 0; background: #fff; border-bottom: 1px solid #eee; padding: 0 18px; position: sticky; top: 55px; z-index: 9; }
+  @media (prefers-color-scheme: dark) { .tabs { background: #18181d; border-color: #2a2a30; } }
+  .tab { padding: 12px 18px; border: 0; background: none; font-size: 14px; color: #666; cursor: pointer; border-bottom: 2px solid transparent; }
+  @media (prefers-color-scheme: dark) { .tab { color: #aaa; } }
+  .tab.active { color: #2563eb; border-bottom-color: #2563eb; font-weight: 600; }
+  .content { padding: 18px; max-width: 1100px; margin: 0 auto; }
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  .card { flex: 1 1 150px; background: #fff; border: 1px solid #eee; border-radius: 10px; padding: 14px 16px; }
+  @media (prefers-color-scheme: dark) { .card { background: #1e1e24; border-color: #2a2a30; } }
   .card .k { font-size: 12px; color: #888; }
   .card .v { font-size: 20px; font-weight: 600; margin-top: 4px; }
-  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-  th, td { text-align: left; padding: 7px 9px; font-size: 13px; border-bottom: 1px solid #eee; }
+  h3 { font-size: 13px; margin: 16px 0 6px; color: #555; }
+  @media (prefers-color-scheme: dark) { h3 { color: #aaa; } }
+  table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #eee; border-radius: 10px; overflow: hidden; }
+  @media (prefers-color-scheme: dark) { table { background: #1e1e24; border-color: #2a2a30; } }
+  th, td { text-align: left; padding: 8px 10px; font-size: 13px; border-bottom: 1px solid #eee; }
   @media (prefers-color-scheme: dark) { th, td { border-bottom: 1px solid #2a2a30; } }
   th { background: #fafafa; color: #666; font-weight: 500; }
   @media (prefers-color-scheme: dark) { th { background: #26262c; color: #aaa; } }
+  tr:last-child td { border-bottom: 0; }
   .mono { font-variant-numeric: tabular-nums; }
   .ok { color: #16a34a; } .bad { color: #dc2626; } .warn { color: #d97706; }
-  .pill { display:inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; }
+  .pill { display:inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 500; }
   .pill.on { background: #dcfce7; color: #16a34a; } .pill.off { background: #fee2e2; color: #dc2626; }
   .pill.synced { background: #dbeafe; color: #1d4ed8; } .pill.local { background: #f3f4f6; color: #6b7280; }
   @media (prefers-color-scheme: dark) { .pill.on { background: #123b24; color: #4ade80; } .pill.off { background: #3b1212; color: #f87171; } .pill.synced { background: #1e3a5f; color: #93c5fd; } .pill.local { background: #2a2a30; color: #9ca3af; } }
-  .logbox { background: #101014; color: #d0d0d0; font-family: ui-monospace, Consolas, monospace; font-size: 12px; padding: 12px; border-radius: 8px; max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
-  .hint { font-size: 12px; color: #999; margin-top: 4px; }
-  .err { color: #dc2626; font-size: 13px; margin-top: 8px; }
+  .logbox { background: #101014; color: #d0d0d0; font-family: ui-monospace, Consolas, monospace; font-size: 12px; padding: 12px; border-radius: 8px; max-height: 60vh; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+  .hint { font-size: 12px; color: #999; }
+  .err { color: #dc2626; font-size: 13px; padding: 8px 18px; }
 </style>
 </head>
 <body>
-<h1>MIT 管理平台</h1>
-<div class="bar">
+<div class="header">
+  <h1>MIT 管理平台</h1>
   <input id="token" type="password" placeholder="管理员 X-API-Token" autocomplete="off">
   <button onclick="load()">刷新</button>
-  <span class="hint">Token 只存你浏览器本地</span>
+  <span class="hint">Token 只存浏览器本地</span>
 </div>
 <div id="err" class="err"></div>
-<div id="root"></div>
+<div class="tabs" id="tabs" style="display:none">
+  <button class="tab active" id="tabBtn0" onclick="switchTab(0)">① 后端执行</button>
+  <button class="tab" id="tabBtn1" onclick="switchTab(1)">② healthdog</button>
+  <button class="tab" id="tabBtn2" onclick="switchTab(2)">③ 用户记录</button>
+</div>
+<div class="content" id="root"></div>
 
 <script>
 const tokenInput = document.getElementById('token');
@@ -56,8 +69,10 @@ tokenInput.oninput = () => localStorage.setItem('mit_token', tokenInput.value);
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function fmtTok(n) { n = Number(n)||0; return n >= 1000000 ? (n/1000000).toFixed(2)+'M' : n >= 1000 ? (n/1000).toFixed(1)+'K' : String(n); }
 function card(k, v) { return `<div class="card"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`; }
+function cardHtml(k, html) { return `<div class="card"><div class="k">${esc(k)}</div><div class="v">${html}</div></div>`; }
 function pill(on, onTxt, offTxt) { return on ? `<span class="pill on">${onTxt}</span>` : `<span class="pill off">${offTxt}</span>`; }
 function table(head, rows) { return `<table><thead><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`; }
+function statusBadge(s) { return s==='done'?'<span class="ok">done</span>':s==='failed'?'<span class="bad">failed</span>':`<span class="warn">${esc(s)}</span>`; }
 
 async function load() {
   const token = tokenInput.value.trim();
@@ -68,48 +83,38 @@ async function load() {
     const r = await fetch('/v1/admin/overview', { headers: { 'X-API-Token': token } });
     if (!r.ok) throw new Error('HTTP ' + r.status + (r.status === 401 ? '（Token 不对）' : ''));
     render(await r.json());
+    document.getElementById('tabs').style.display = 'flex';
   } catch (e) { errEl.textContent = '加载失败：' + e.message; }
 }
 
 function render(d) {
-  // ---- 模块一：后端执行记录 ----
-  const be = d.backend || {};
-  const eng = be.engine || {};
+  // 模块一：后端执行
+  const be = d.backend || {}, eng = be.engine || {};
   const q = eng.queue_size;
   const queueTxt = (q && typeof q === 'object') ? (q.queue_size != null ? q.queue_size : JSON.stringify(q)) : (q != null ? q : '-');
-  let b1 = `<div class="module"><h2>① 后端执行记录</h2>
-    <div class="cards">
-      ${card('引擎', pill(eng.ok, '在线', '离线'))}
-      ${card('数据库', pill(eng.db_ok, '正常', '异常'))}
-      ${card('Redis', pill(eng.redis_ok, '正常', '异常'))}
-      ${card('引擎队列', esc(queueTxt))}
+  let b1 = `<div class="cards">
+      ${cardHtml('引擎', pill(eng.ok, '在线', '离线'))}
+      ${cardHtml('数据库', pill(eng.db_ok, '正常', '异常'))}
+      ${cardHtml('Redis', pill(eng.redis_ok, '正常', '异常'))}
+      ${card('引擎队列', queueTxt)}
     </div>`;
-
   const jobs = be.jobs || [];
-  if (jobs.length) b1 += `<h3 style="font-size:13px;margin:10px 0 4px">最近任务</h3>` + table(
-    ['动作','状态','书','排队时间','完成时间'], jobs.map(j =>
-      `<tr><td class="mono">${esc(j.action)}</td><td>${j.status==='done'?'<span class="ok">done</span>':j.status==='failed'?'<span class="bad">failed</span>':`<span class="warn">${esc(j.status)}</span>`}</td><td>${esc(j.title||j.book_id)}</td><td class="mono">${String(j.queued_at||'').slice(0,16)}</td><td class="mono">${String(j.finished_at||'').slice(0,16)}</td></tr>`));
-
+  if (jobs.length) b1 += `<h3>最近任务</h3>` + table(['动作','状态','书','排队时间','完成时间'], jobs.map(j =>
+    `<tr><td class="mono">${esc(j.action)}</td><td>${statusBadge(j.status)}</td><td>${esc(j.title||j.book_id)}</td><td class="mono">${String(j.queued_at||'').slice(0,16)}</td><td class="mono">${String(j.finished_at||'').slice(0,16)}</td></tr>`));
   const pages = be.pages || [];
-  if (pages.length) b1 += `<h3 style="font-size:13px;margin:10px 0 4px">最近翻译页</h3>` + table(
-    ['书','页','状态','Token','耗时(ms)','时间'], pages.map(p =>
-      `<tr><td>${esc(p.title)}</td><td class="mono">${(p.page_index??0)+1}</td><td>${p.status==='done'?'<span class="ok">done</span>':p.status==='failed'?'<span class="bad">failed</span>':`<span class="warn">${esc(p.status)}</span>`}</td><td class="mono">${fmtTok(p.tokens)}</td><td class="mono">${p.elapsed_ms||0}</td><td class="mono">${String(p.updated_at||'').slice(0,16)}</td></tr>`));
-  b1 += `</div>`;
+  if (pages.length) b1 += `<h3>最近翻译页</h3>` + table(['书','页','状态','Token','耗时(ms)','时间'], pages.map(p =>
+    `<tr><td>${esc(p.title)}</td><td class="mono">${(p.page_index??0)+1}</td><td>${statusBadge(p.status)}</td><td class="mono">${fmtTok(p.tokens)}</td><td class="mono">${p.elapsed_ms||0}</td><td class="mono">${String(p.updated_at||'').slice(0,16)}</td></tr>`));
 
-  // ---- 模块二：healthdog ----
-  const hd = d.healthdog || {};
-  const th = hd.token_history || [];
-  let b2 = `<div class="module"><h2>② healthdog 自愈守护</h2>`;
-  if (th.length) b2 += table(['快照时间','累计 Token','累计翻页数'], th.slice().reverse().map(t =>
-    `<tr><td class="mono">${esc(t.time)}</td><td class="mono">${fmtTok(t.token_used)}</td><td class="mono">${fmtTok(t.pages)}</td></tr>`));
+  // 模块二：healthdog
+  const hd = d.healthdog || {}, th = hd.token_history || [];
+  let b2 = th.length ? table(['快照时间','累计 Token','累计翻页数'], th.slice().reverse().map(t =>
+    `<tr><td class="mono">${esc(t.time)}</td><td class="mono">${fmtTok(t.token_used)}</td><td class="mono">${fmtTok(t.pages)}</td></tr>`)) : '<p style="color:#999">暂无快照</p>';
   const ops = hd.ops_log || [];
-  b2 += `<h3 style="font-size:13px;margin:10px 0 4px">操作日志（${ops.length} 行）</h3><div class="logbox">${esc(ops.join('\n'))||'(空)'}</div></div>`;
+  b2 += `<h3>操作日志（${ops.length} 行）</h3><div class="logbox">${esc(ops.join('\n'))||'(空)'}</div>`;
 
-  // ---- 模块三：用户记录 ----
-  const um = d.users || {};
-  const st = um.stats || {};
-  let b3 = `<div class="module"><h2>③ 用户记录</h2>
-    <div class="cards">
+  // 模块三：用户记录
+  const um = d.users || {}, st = um.stats || {};
+  let b3 = `<div class="cards">
       ${card('用户数', fmtTok(st.users))}
       ${card('总 Token', fmtTok(st.tokens))}
       ${card('书数', fmtTok(st.books))}
@@ -118,16 +123,21 @@ function render(d) {
       ${card('失败页', fmtTok(st.failed_pages))}
     </div>`;
   const users = um.users || [];
-  if (users.length) b3 += `<h3 style="font-size:13px;margin:10px 0 4px">所有用户</h3>` + table(
-    ['用户 ID','Token','翻页数','创建','最后活跃'], users.map(u =>
-      `<tr><td class="mono">${esc(u.id)}</td><td class="mono">${fmtTok(u.token_used)}</td><td class="mono">${fmtTok(u.page_count)}</td><td class="mono">${String(u.created_at||'').slice(0,10)}</td><td class="mono">${String(u.last_active_at||'').slice(0,16)}</td></tr>`));
+  if (users.length) b3 += `<h3>所有用户</h3>` + table(['用户 ID','Token','翻页数','创建','最后活跃'], users.map(u =>
+    `<tr><td class="mono">${esc(u.id)}</td><td class="mono">${fmtTok(u.token_used)}</td><td class="mono">${fmtTok(u.page_count)}</td><td class="mono">${String(u.created_at||'').slice(0,10)}</td><td class="mono">${String(u.last_active_at||'').slice(0,16)}</td></tr>`));
   const books = um.books || [];
-  if (books.length) b3 += `<h3 style="font-size:13px;margin:10px 0 4px">每本书</h3>` + table(
-    ['书名','状态','页数','已翻','失败','Token'], books.map(b =>
-      `<tr><td>${esc(b.title)}</td><td>${b.synced?'<span class="pill synced">已同步</span>':'<span class="pill local">本地</span>'}</td><td class="mono">${b.pages||0}</td><td class="mono ok">${b.done_pages||0}</td><td class="mono bad">${b.failed_pages||0}</td><td class="mono">${fmtTok(b.tokens)}</td></tr>`));
-  b3 += `</div>`;
+  if (books.length) b3 += `<h3>每本书</h3>` + table(['书名','状态','页数','已翻','失败','Token'], books.map(b =>
+    `<tr><td>${esc(b.title)}</td><td>${b.synced?'<span class="pill synced">已同步</span>':'<span class="pill local">本地</span>'}</td><td class="mono">${b.pages||0}</td><td class="mono ok">${b.done_pages||0}</td><td class="mono bad">${b.failed_pages||0}</td><td class="mono">${fmtTok(b.tokens)}</td></tr>`));
 
-  document.getElementById('root').innerHTML = b1 + b2 + b3;
+  document.getElementById('root').innerHTML =
+    `<div id="tab0">${b1}</div><div id="tab1" style="display:none">${b2}</div><div id="tab2" style="display:none">${b3}</div>`;
+}
+
+function switchTab(i) {
+  for (let k = 0; k < 3; k++) {
+    document.getElementById('tab' + k).style.display = (k === i) ? 'block' : 'none';
+    document.getElementById('tabBtn' + k).className = (k === i) ? 'tab active' : 'tab';
+  }
 }
 
 if (tokenInput.value) load();
