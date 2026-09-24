@@ -78,3 +78,4 @@ secret.env
 
 # 自愈守护日志
 /ops/healthdog.log
+/ops/usage.mark

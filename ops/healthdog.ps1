@@ -41,3 +41,29 @@ if ($free -lt 5GB) {
     docker builder prune -af 2>&1 | Out-Null
     docker image prune -af 2>&1 | Out-Null
 }
+
+# 4) token consumption: fetch /v1/usage and log cumulative usage (throttled to every 6h)
+$usageMark = Join-Path $PSScriptRoot 'usage.mark'
+$shouldLogUsage = $true
+if (Test-Path $usageMark) {
+    $lastMark = (Get-Item $usageMark).LastWriteTime
+    if ((Get-Date) - $lastMark -lt [timespan]::FromHours(6)) { $shouldLogUsage = $false }
+}
+if ($shouldLogUsage) {
+    $envFile = Join-Path $PSScriptRoot '..\app.env'
+    $apiToken = ''
+    if (Test-Path $envFile) {
+        $line = (Select-String -Path $envFile -Pattern '^MIT_API_TOKEN=' | Select-Object -First 1).Line
+        if ($line) { $apiToken = $line.Split('=', 2)[1].Trim() }
+    }
+    if ($apiToken) {
+        try {
+            $u = Invoke-RestMethod -Uri 'http://127.0.0.1:8020/v1/usage' -Headers @{'X-API-Token' = $apiToken} -TimeoutSec 10
+            $usg = $u.usage
+            Log "token usage: token_used=$($usg.token_used) pages=$($usg.page_count) last_active=$($usg.last_active_at)"
+            Set-Content -Path $usageMark -Value (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -Encoding UTF8
+        } catch {
+            Log "fetch token usage failed: $_"
+        }
+    }
+}
