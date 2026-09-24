@@ -58,6 +58,11 @@
   <table><thead><tr><th>书名</th><th>状态</th><th>页数</th><th>已翻</th><th>失败</th><th>Token</th></tr></thead><tbody id="booksBody"></tbody></table>
 </div>
 
+<div id="tokenHist" style="display:none">
+  <h2>healthdog Token 消耗快照（每 24h 记一次）</h2>
+  <table><thead><tr><th>时间</th><th>累计 Token</th><th>累计翻页数</th></tr></thead><tbody id="tokenHistBody"></tbody></table>
+</div>
+
 <div id="log" style="display:none">
   <h2>healthdog 操作日志</h2>
   <div class="logbox" id="logBox"></div>
@@ -110,6 +115,14 @@ function render(d) {
       const pill = b.synced ? '<span class="pill synced">已同步</span>' : '<span class="pill local">本地</span>';
       return `<tr><td>${esc(b.title)}</td><td>${pill}</td><td class="mono">${b.pages||0}</td><td class="mono ok">${b.done_pages||0}</td><td class="mono bad">${b.failed_pages||0}</td><td class="mono">${fmtTok(b.tokens)}</td></tr>`;
     }).join('');
+  }
+
+  const th = d.token_history || [];
+  if (th.length) {
+    document.getElementById('tokenHist').style.display = 'block';
+    document.getElementById('tokenHistBody').innerHTML = th.slice().reverse().map(t =>
+      `<tr><td class="mono">${esc(t.time)}</td><td class="mono">${fmtTok(t.token_used)}</td><td class="mono">${fmtTok(t.pages)}</td></tr>`
+    ).join('');
   }
 
   const lines = d.ops_log || [];

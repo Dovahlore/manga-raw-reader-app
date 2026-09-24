@@ -13,6 +13,7 @@ import copy
 import hashlib
 import io
 import json
+import re
 import shutil
 import threading
 import time
@@ -636,8 +637,15 @@ async def admin_overview():
     lines = []
     if log_path.exists():
         lines = await run_in_threadpool(
-            lambda: log_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-200:])
-    return {"stats": stats or {}, "users": users, "books": books, "ops_log": lines}
+            lambda: log_path.read_text(encoding="utf-8", errors="ignore").splitlines())
+    # 从日志解析 token 快照（healthdog 每天记的 "token usage: token_used=... pages=..."）
+    token_history = []
+    for line in lines:
+        m = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*token_used=(\d+)\s+pages=(\d+)', line)
+        if m:
+            token_history.append({"time": m.group(1), "token_used": int(m.group(2)), "pages": int(m.group(3))})
+    return {"stats": stats or {}, "users": users, "books": books,
+            "token_history": token_history, "ops_log": lines[-1000:]}
 
 
 @app.get("/dashboard", include_in_schema=False)
