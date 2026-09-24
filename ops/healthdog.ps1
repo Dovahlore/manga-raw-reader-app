@@ -1,7 +1,8 @@
 # healthdog.ps1 - self-healing watchdog for the mit docker project
 # usage: run via Windows Task Scheduler every 5 minutes
 $ErrorActionPreference = 'SilentlyContinue'
-$LogFile = Join-Path $PSScriptRoot 'healthdog.log'
+# 日志写到 _runtime/data/app（挂到 app-api 容器 /data），web 看板能直接读
+$LogFile = Join-Path $PSScriptRoot '..\_runtime\data\app\healthdog.log'
 
 function Log([string]$m) {
     $line = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $m"
@@ -42,12 +43,12 @@ if ($free -lt 5GB) {
     docker image prune -af 2>&1 | Out-Null
 }
 
-# 4) token consumption: fetch /v1/usage and log cumulative usage (throttled to every 6h)
+# 4) token consumption: fetch /v1/usage and log cumulative usage (throttled to every 24h)
 $usageMark = Join-Path $PSScriptRoot 'usage.mark'
 $shouldLogUsage = $true
 if (Test-Path $usageMark) {
     $lastMark = (Get-Item $usageMark).LastWriteTime
-    if ((Get-Date) - $lastMark -lt [timespan]::FromHours(6)) { $shouldLogUsage = $false }
+    if ((Get-Date) - $lastMark -lt [timespan]::FromHours(24)) { $shouldLogUsage = $false }
 }
 if ($shouldLogUsage) {
     $envFile = Join-Path $PSScriptRoot '..\app.env'

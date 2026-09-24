@@ -611,30 +611,33 @@ async def usage(owner: str = Depends(get_owner)):
     return {"user_id": owner, "usage": row or {}}
 
 
-@app.get("/v1/dashboard", dependencies=[Depends(auth)])
-async def dashboard(owner: str = Depends(get_owner)):
-    """看板数据：token 消耗汇总 + 每本书用量 + 最近操作日志 + 近 14 天逐日消耗。"""
-    usage_row = await run_in_threadpool(
+@app.get("/v1/admin/overview", dependencies=[Depends(auth)])
+async def admin_overview():
+    """管理平台总览：所有用户消耗 + 全局统计 + 每本书 + healthdog 操作日志（管理员专用）。"""
+    users = await run_in_threadpool(
+        db.query,
+        "SELECT id, name, token_used, page_count, created_at, last_active_at "
+        "FROM users ORDER BY token_used DESC")
+    stats = await run_in_threadpool(
         db.query_one,
-        "SELECT token_used, page_count, created_at, last_active_at FROM users WHERE id=%s", (owner,))
-    per_book = await run_in_threadpool(
+        "SELECT (SELECT COUNT(*) FROM books) AS books, "
+        "(SELECT COUNT(*) FROM pages) AS pages, "
+        "(SELECT COALESCE(SUM(status='done'),0) FROM pages) AS done_pages, "
+        "(SELECT COALESCE(SUM(status='failed'),0) FROM pages) AS failed_pages, "
+        "(SELECT COALESCE(SUM(token_used),0) FROM users) AS tokens")
+    books = await run_in_threadpool(
         db.query,
-        "SELECT b.title, COUNT(p.id) AS pages, SUM(p.status='done') AS done_pages, "
-        "COALESCE(SUM(p.tokens),0) AS tokens "
+        "SELECT b.title, b.page_count AS total_pages, b.zip_path IS NOT NULL AS synced, "
+        "COUNT(p.id) AS pages, COALESCE(SUM(p.status='done'),0) AS done_pages, "
+        "COALESCE(SUM(p.status='failed'),0) AS failed_pages, COALESCE(SUM(p.tokens),0) AS tokens "
         "FROM books b LEFT JOIN pages p ON p.book_id=b.id "
-        "WHERE b.owner=%s GROUP BY b.id, b.title ORDER BY tokens DESC", (owner,))
-    recent = await run_in_threadpool(
-        db.query,
-        "SELECT b.title, p.page_index, p.status, p.tokens, p.updated_at "
-        "FROM pages p LEFT JOIN books b ON b.id=p.book_id "
-        "WHERE b.owner=%s ORDER BY p.updated_at DESC LIMIT 100", (owner,))
-    per_day = await run_in_threadpool(
-        db.query,
-        "SELECT DATE(p.updated_at) AS d, COALESCE(SUM(p.tokens),0) AS tokens, COUNT(*) AS pages "
-        "FROM pages p JOIN books b ON b.id=p.book_id "
-        "WHERE b.owner=%s AND p.updated_at >= NOW() - INTERVAL 14 DAY "
-        "GROUP BY DATE(p.updated_at) ORDER BY d DESC", (owner,))
-    return {"usage": usage_row or {}, "per_book": per_book, "recent": recent, "per_day": per_day}
+        "GROUP BY b.id, b.title, b.page_count, b.zip_path ORDER BY tokens DESC")
+    log_path = S.DATA_DIR / "healthdog.log"
+    lines = []
+    if log_path.exists():
+        lines = await run_in_threadpool(
+            lambda: log_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-200:])
+    return {"stats": stats or {}, "users": users, "books": books, "ops_log": lines}
 
 
 @app.get("/dashboard", include_in_schema=False)

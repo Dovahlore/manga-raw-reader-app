@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MIT 管理看板</title>
+<title>MIT 管理平台</title>
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -15,7 +15,7 @@
   button { padding: 8px 16px; border: 0; border-radius: 6px; background: #2563eb; color: #fff; font-size: 14px; cursor: pointer; }
   button:hover { background: #1d4ed8; }
   .cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
-  .card { flex: 1 1 160px; background: #fff; border-radius: 10px; padding: 14px 16px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+  .card { flex: 1 1 150px; background: #fff; border-radius: 10px; padding: 14px 16px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
   @media (prefers-color-scheme: dark) { .card { background: #1e1e24; } }
   .card .k { font-size: 12px; color: #888; }
   .card .v { font-size: 22px; font-weight: 600; margin-top: 4px; }
@@ -27,37 +27,40 @@
   th { background: #fafafa; color: #666; font-weight: 500; }
   @media (prefers-color-scheme: dark) { th { background: #26262c; color: #aaa; } }
   .mono { font-variant-numeric: tabular-nums; }
-  .ok { color: #16a34a; } .bad { color: #dc2626; } .warn { color: #d97706; }
-  .chart { display: flex; align-items: flex-end; gap: 6px; height: 120px; padding: 10px; background: #fff; border-radius: 10px; }
-  @media (prefers-color-scheme: dark) { .chart { background: #1e1e24; } }
-  .chart .col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; }
-  .chart .bar { width: 70%; background: #2563eb; border-radius: 4px 4px 0 0; min-height: 2px; }
-  .chart .lbl { font-size: 10px; color: #888; writing-mode: vertical-rl; }
+  .ok { color: #16a34a; } .bad { color: #dc2626; }
+  .logbox { background: #101014; color: #d0d0d0; font-family: ui-monospace, Consolas, monospace; font-size: 12px; padding: 12px; border-radius: 10px; max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
   .hint { font-size: 12px; color: #999; margin-top: 4px; }
   .err { color: #dc2626; font-size: 13px; margin-top: 8px; }
+  .pill { display:inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; }
+  .pill.synced { background: #dbeafe; color: #1d4ed8; }
+  .pill.local { background: #f3f4f6; color: #6b7280; }
+  @media (prefers-color-scheme: dark) { .pill.synced { background: #1e3a5f; color: #93c5fd; } .pill.local { background: #2a2a30; color: #9ca3af; } }
 </style>
 </head>
 <body>
-<h1>MIT 管理看板</h1>
+<h1>MIT 管理平台</h1>
 <div class="bar">
-  <input id="token" type="password" placeholder="X-API-Token（MIT_API_TOKEN）" autocomplete="off">
+  <input id="token" type="password" placeholder="管理员 X-API-Token" autocomplete="off">
   <button onclick="load()">刷新</button>
-  <span class="hint">Token 只存你浏览器本地，发请求时带 X-API-Token 头</span>
+  <span class="hint">Token 只存你浏览器本地</span>
 </div>
 <div id="err" class="err"></div>
 
 <div class="cards" id="cards" style="display:none"></div>
-<div id="perday" style="display:none">
-  <h2>近 14 天 Token 消耗</h2>
-  <div class="chart" id="chart"></div>
+
+<div id="users" style="display:none">
+  <h2>所有用户消耗</h2>
+  <table><thead><tr><th>用户 ID</th><th>Token 消耗</th><th>翻页数</th><th>最后活跃</th></tr></thead><tbody id="usersBody"></tbody></table>
 </div>
+
 <div id="books" style="display:none">
-  <h2>每本书用量</h2>
-  <table><thead><tr><th>书名</th><th>页数</th><th>已翻</th><th>Token</th></tr></thead><tbody id="booksBody"></tbody></table>
+  <h2>书库总览</h2>
+  <table><thead><tr><th>书名</th><th>状态</th><th>页数</th><th>已翻</th><th>失败</th><th>Token</th></tr></thead><tbody id="booksBody"></tbody></table>
 </div>
-<div id="recent" style="display:none">
-  <h2>最近操作日志</h2>
-  <table><thead><tr><th>书名</th><th>页</th><th>状态</th><th>Token</th><th>时间</th></tr></thead><tbody id="recentBody"></tbody></table>
+
+<div id="log" style="display:none">
+  <h2>healthdog 操作日志</h2>
+  <div class="logbox" id="logBox"></div>
 </div>
 
 <script>
@@ -65,69 +68,57 @@ const tokenInput = document.getElementById('token');
 tokenInput.value = localStorage.getItem('mit_token') || '';
 tokenInput.oninput = () => localStorage.setItem('mit_token', tokenInput.value);
 
-function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-}
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function fmtTok(n) { n = Number(n)||0; return n >= 1000000 ? (n/1000000).toFixed(2)+'M' : n >= 1000 ? (n/1000).toFixed(1)+'K' : String(n); }
+function card(k, v) { return `<div class="card"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`; }
 
 async function load() {
   const token = tokenInput.value.trim();
   const errEl = document.getElementById('err');
   errEl.textContent = '';
-  if (!token) { errEl.textContent = '请先填 X-API-Token'; return; }
+  if (!token) { errEl.textContent = '请先填管理员 X-API-Token'; return; }
   try {
-    const r = await fetch('/v1/dashboard', { headers: { 'X-API-Token': token } });
+    const r = await fetch('/v1/admin/overview', { headers: { 'X-API-Token': token } });
     if (!r.ok) throw new Error('HTTP ' + r.status + (r.status === 401 ? '（Token 不对）' : ''));
-    const d = await r.json();
-    render(d);
+    render(await r.json());
   } catch (e) { errEl.textContent = '加载失败：' + e.message; }
 }
 
 function render(d) {
-  const u = d.usage || {};
+  const s = d.stats || {};
   const cards = document.getElementById('cards');
   cards.style.display = 'flex';
   cards.innerHTML =
-    card('总 Token', fmtTok(u.token_used)) +
-    card('总翻页数', fmtTok(u.page_count)) +
-    card('最后活跃', (u.last_active_at || '-').toString().slice(0, 16));
+    card('总 Token', fmtTok(s.tokens)) +
+    card('总翻页数', fmtTok(s.pages)) +
+    card('已完成页', fmtTok(s.done_pages)) +
+    card('失败页', fmtTok(s.failed_pages)) +
+    card('书数', fmtTok(s.books));
 
-  // 逐日
-  const pd = d.per_day || [];
-  const chart = document.getElementById('chart');
-  if (pd.length) {
-    document.getElementById('perday').style.display = 'block';
-    const max = Math.max(1, ...pd.map(x => Number(x.tokens)||0));
-    chart.innerHTML = pd.slice().reverse().map(x =>
-      `<div class="col"><div class="bar" style="height:${(Number(x.tokens)||0)/max*100}px" title="${x.d}: ${fmtTok(x.tokens)} tokens"></div><div class="lbl">${String(x.d).slice(5)}</div></div>`
+  const users = d.users || [];
+  if (users.length) {
+    document.getElementById('users').style.display = 'block';
+    document.getElementById('usersBody').innerHTML = users.map(u =>
+      `<tr><td class="mono">${esc(u.id)}</td><td class="mono">${fmtTok(u.token_used)}</td><td class="mono">${fmtTok(u.page_count)}</td><td class="mono">${String(u.last_active_at||'').slice(0,16)}</td></tr>`
     ).join('');
   }
 
-  // 每本书
-  const books = d.per_book || [];
+  const books = d.books || [];
   if (books.length) {
     document.getElementById('books').style.display = 'block';
-    document.getElementById('booksBody').innerHTML = books.map(b =>
-      `<tr><td>${esc(b.title)}</td><td class="mono">${b.pages||0}</td><td class="mono">${b.done_pages||0}</td><td class="mono">${fmtTok(b.tokens)}</td></tr>`
-    ).join('');
-  }
-
-  // 最近操作
-  const recent = d.recent || [];
-  if (recent.length) {
-    document.getElementById('recent').style.display = 'block';
-    document.getElementById('recentBody').innerHTML = recent.map(o => {
-      const st = o.status === 'done' ? '<span class="ok">done</span>' : o.status === 'failed' ? '<span class="bad">failed</span>' : '<span class="warn">'+esc(o.status)+'</span>';
-      return `<tr><td>${esc(o.title)}</td><td class="mono">${(o.page_index??0)+1}</td><td>${st}</td><td class="mono">${fmtTok(o.tokens)}</td><td class="mono">${String(o.updated_at||'').slice(0,16)}</td></tr>`;
+    document.getElementById('booksBody').innerHTML = books.map(b => {
+      const pill = b.synced ? '<span class="pill synced">已同步</span>' : '<span class="pill local">本地</span>';
+      return `<tr><td>${esc(b.title)}</td><td>${pill}</td><td class="mono">${b.pages||0}</td><td class="mono ok">${b.done_pages||0}</td><td class="mono bad">${b.failed_pages||0}</td><td class="mono">${fmtTok(b.tokens)}</td></tr>`;
     }).join('');
   }
+
+  const lines = d.ops_log || [];
+  if (lines.length) {
+    document.getElementById('log').style.display = 'block';
+    document.getElementById('logBox').textContent = lines.join('\n');
+  }
 }
 
-function card(k, v) {
-  return `<div class="card"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`;
-}
-
-// 打开自动加载一次
 if (tokenInput.value) load();
 </script>
 </body>
