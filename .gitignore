@@ -75,3 +75,6 @@ secret.env
 /test/*.mobi
 /test/*.epub
 /test/*.zip
+
+# 自愈守护日志
+/scripts/healthdog.log
