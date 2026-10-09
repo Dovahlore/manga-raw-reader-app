@@ -2,6 +2,8 @@ package com.mit.reader
 
 import android.app.Application
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -980,12 +982,19 @@ class ReaderApp : Application() {
         private set
     var updateMessage by mutableStateOf("")
         private set
+    var updateError by mutableStateOf(false)
+        private set
 
     /** 检查新版本。manual=true 时即使无新版也给出「已是最新」反馈。 */
     fun checkForUpdate(manual: Boolean) {
         if (updateChecking) return
+        if (manual && !isNetworkAvailable()) {
+            updateMessage = "未连接网络"
+            updateError = true
+            return
+        }
         updateChecking = true
-        if (manual) updateMessage = "正在检查…"
+        if (manual) { updateMessage = "正在检查…"; updateError = false }
         appScope.launch {
             try {
                 val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: "universal"
@@ -993,14 +1002,17 @@ class ReaderApp : Application() {
                 if (info.latest) {
                     updateInfo = info
                     updateMessage = ""
+                    updateError = false
                 } else {
                     updateInfo = null
-                    if (manual) updateMessage = "已是最新版本（${BuildConfig.VERSION_NAME}）"
+                    if (manual) { updateMessage = "已是最新版本（${BuildConfig.VERSION_NAME}）"; updateError = false }
                 }
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: java.io.IOException) {
+                if (manual) { updateMessage = "未连接，请检查网络或服务器地址"; updateError = true }
             } catch (e: Exception) {
-                if (manual) updateMessage = "检查失败：${e.message}"
+                if (manual) { updateMessage = "检查失败：${e.message}"; updateError = true }
             } finally {
                 updateChecking = false
             }
@@ -1013,6 +1025,7 @@ class ReaderApp : Application() {
         if (updateDownloading) return
         updateDownloading = true
         updateMessage = "正在下载…"
+        updateError = false
         appScope.launch {
             try {
                 val dir = File(getExternalFilesDir(null), "updates").apply { mkdirs() }
@@ -1032,16 +1045,29 @@ class ReaderApp : Application() {
                     part.delete()
                 }
                 updateMessage = "下载完成，正在打开安装…"
+                updateError = false
                 installApk(apk)
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: java.io.IOException) {
+                updateMessage = "未连接，请检查网络或服务器地址"
+                updateError = true
             } catch (e: Exception) {
                 updateMessage = "下载失败：${e.message}"
+                updateError = true
             } finally {
                 updateDownloading = false
                 updateDownloadProgress = null
             }
         }
+    }
+
+    /** 快速判断是否有可用网络（离线时立刻提示，不等 HTTP 超时）。 */
+    private fun isNetworkAvailable(): Boolean {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return true
+        val net = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(net) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     private fun installApk(apk: File) {
