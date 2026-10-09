@@ -312,8 +312,8 @@ fun LibraryScreen(onOpen: (String) -> Unit, onSettings: () -> Unit, onKmoe: () -
 
     // 后台导入新书（下载完成 / 扫描文件夹）后自动刷新书库，不用等 60 秒定时刷新
 
-    // 云端列表：进入/刷新/切 tab 时拉一次（书库筛选同步状态时要用）
-    LaunchedEffect(refreshing, tab) {
+    // 云端列表：进入/刷新/切 tab/云端增删书（cloudRevision 变化）时拉一次
+    LaunchedEffect(refreshing, tab, app.cloudRevision) {
         runCatching { app.api.cloudList() }
             .onSuccess {
                 if (cloudBooks != it) cloudBooks = it
