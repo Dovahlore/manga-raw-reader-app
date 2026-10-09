@@ -1241,6 +1241,14 @@ class LibraryRepository(private val context: Context) {
             .apply()
     }
 
+    /** 带指定时间戳记录进度（对传/云端同步用，避免覆盖成「现在」）。 */
+    fun setReadingProgressAt(bookId: String, page: Int, lastReadAt: Long) {
+        progressPrefs.edit()
+            .putInt("page_$bookId", page.coerceAtLeast(0))
+            .putLong("time_$bookId", lastReadAt)
+            .apply()
+    }
+
     fun readingProgress(bookId: String): ReadingProgress? {
         val t = progressPrefs.getLong("time_$bookId", 0L)
         if (t == 0L) return null
@@ -1343,6 +1351,7 @@ class LibraryRepository(private val context: Context) {
         }
         val index = readIndexData()
         val folderName = book.folderId?.let { fid -> index.folders.find { it.id == fid }?.name }
+        val progress = readingProgress(book.id)
         val manifest = JSONObject().apply {
             put("v", 1)
             put("title", book.title)
@@ -1352,6 +1361,7 @@ class LibraryRepository(private val context: Context) {
             put("fingerprint", book.fingerprint)
             put("orderDir", if (book.mode == ReadingMode.MANGA) "rtl" else "ltr")
             folderName?.takeIf { it.isNotBlank() }?.let { put("folder", it) }
+            progress?.let { put("readingProgress", JSONObject().apply { put("page", it.page); put("lastReadAt", it.lastReadAt) }) }
             put("pages", pagesArr)
             put("translated", translatedArr)
             put("syncMeta", syncMetaObj)
@@ -1390,6 +1400,7 @@ class LibraryRepository(private val context: Context) {
                             added++
                         }
                     }
+                    applyIncomingProgress(existing.id, m)
                     return@withPermit TransferImportResult(existing, true, added, translatedArr.length() - added)
                 }
 
@@ -1441,6 +1452,7 @@ class LibraryRepository(private val context: Context) {
                         createdAt = System.currentTimeMillis(),
                     )
                     writeIndex(d.books + book, folders)
+                    applyIncomingProgress(id, m)
                     success = true
                     TransferImportResult(book, false, translatedCount, 0)
                 } finally {
@@ -1451,6 +1463,18 @@ class LibraryRepository(private val context: Context) {
 
     private fun safeTransferName(name: String): Boolean =
         name.isNotBlank() && !name.contains("/") && !name.contains("\\") && !name.contains("..")
+
+    /** 应用对传/同步来的阅读进度（LWW：只接受更新的）。 */
+    private fun applyIncomingProgress(bookId: String, m: JSONObject) {
+        val p = m.optJSONObject("readingProgress") ?: return
+        val page = p.optInt("page", 0)
+        val at = p.optLong("lastReadAt", 0L)
+        if (at <= 0L) return
+        val local = readingProgress(bookId)
+        if (local == null || at > local.lastReadAt) {
+            setReadingProgressAt(bookId, page, at)
+        }
+    }
 
     // ---------------------------------------------------------------- index 持久化
 

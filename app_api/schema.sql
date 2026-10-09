@@ -153,3 +153,16 @@ CREATE TABLE IF NOT EXISTS app_releases (
   UNIQUE KEY uniq_release (channel, platform, abi, version_code),
   KEY idx_latest (channel, platform, abi, enabled, version_code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============================================================
+-- 阅读进度（云端书按 owner+book_id 存，跨设备同步）
+-- last_read_at 用客户端毫秒时间戳做 LWW（最后写入者胜）。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS reading_progress (
+  owner        VARCHAR(191) NOT NULL DEFAULT 'default',
+  book_id      VARCHAR(191) NOT NULL,          -- 云端书的 cloudId
+  page         INT NOT NULL,
+  last_read_at BIGINT NOT NULL,                -- 客户端毫秒时间戳
+  updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (owner, book_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

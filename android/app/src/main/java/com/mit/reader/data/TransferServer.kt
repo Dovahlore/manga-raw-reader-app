@@ -155,6 +155,7 @@ class TransferServer(
             put("spaceOk", spaceOk)
             put("requiredBytes", requiredBytes)
             put("title", title)
+            put("existed", existing != null)
         })
     }
 

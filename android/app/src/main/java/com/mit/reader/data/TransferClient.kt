@@ -78,6 +78,9 @@ class TransferClient(
         val base = "http://${device.host}:${device.port}"
         onStage("正在建立会话…")
         val plan = postSession(base, manifestJson)
+        if (plan.optBoolean("existed", false)) {
+            throw PeerHasBookException()
+        }
         if (!plan.optBoolean("spaceOk", true)) {
             throw IllegalStateException("对端空间不足（需约 ${formatBytes(plan.optLong("requiredBytes", 0))}）")
         }

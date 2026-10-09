@@ -57,6 +57,11 @@ data class AppUpdate(
     val minVersionCode: Int = 0,
     val downloadPath: String = "",
 )
+data class ReadingProgressResp(
+    val bookId: String,
+    val page: Int?,
+    val lastReadAt: Long?,
+)
 data class UsageInfo(
     val userId: String,
     val tokenUsed: Long,
@@ -300,6 +305,36 @@ class TranslationApi {
                     downloadPath = j.optString("download_path"),
                 )
             }
+        }
+
+    /** 拉取当前账号所有云端书的阅读进度。 */
+    suspend fun getReadingProgressList(): List<ReadingProgressResp> =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val req = Request.Builder().url("$base/v1/reading-progress").authed().build()
+            client.newCall(req).execute().use { resp ->
+                val text = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
+                val arr = JSONObject(text).optJSONArray("progress") ?: JSONArray()
+                (0 until arr.length()).map { i ->
+                    val o = arr.getJSONObject(i)
+                    ReadingProgressResp(
+                        bookId = o.getString("book_id"),
+                        page = if (o.isNull("page")) null else o.optInt("page"),
+                        lastReadAt = if (o.isNull("last_read_at")) null else o.optLong("last_read_at"),
+                    )
+                }
+            }
+        }
+
+    /** 上传某本云端书的阅读进度（LWW）。 */
+    suspend fun putReadingProgress(bookId: String, page: Int, lastReadAt: Long): Boolean =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val body = JSONObject().apply {
+                put("page", page)
+                put("last_read_at", lastReadAt)
+            }.toString().toRequestBody("application/json".toMediaType())
+            val req = Request.Builder().url("$base/v1/reading-progress/$bookId").authed().put(body).build()
+            client.newCall(req).execute().use { it.isSuccessful }
         }
 
     /** 测连通：GET /v1/health，返回状态说明。 */

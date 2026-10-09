@@ -19,6 +19,7 @@ import com.mit.reader.data.AppUpdate
 import com.mit.reader.data.Book
 import com.mit.reader.data.CloudBook
 import com.mit.reader.data.DiscoveredDevice
+import com.mit.reader.data.PeerHasBookException
 import com.mit.reader.data.TransferClient
 import com.mit.reader.data.TransferServer
 import com.mit.reader.data.Folder
@@ -1150,6 +1151,8 @@ class ReaderApp : Application() {
                     )
                 }
                 Toast.makeText(this@ReaderApp, "已发送《${book.title}》", Toast.LENGTH_SHORT).show()
+            } catch (e: PeerHasBookException) {
+                Toast.makeText(this@ReaderApp, "对端已有这本书", Toast.LENGTH_SHORT).show()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -1157,6 +1160,38 @@ class ReaderApp : Application() {
             } finally {
                 delay(2000)
                 shareTasks.remove(book.id)
+            }
+        }
+    }
+
+    // ---- 阅读进度同步（翻页防抖推后端 + 启动/定时拉后端）----
+
+    private val progressPushJobs = mutableMapOf<String, Job>()
+
+    /** 翻页时记录进度：本地立刻存；云端书防抖 2 秒推后端。 */
+    fun recordReadingProgress(book: Book, page: Int) {
+        val now = System.currentTimeMillis()
+        library.setReadingProgressAt(book.id, page, now)
+        val cloudId = book.cloudId ?: return
+        progressPushJobs[book.id]?.cancel()
+        progressPushJobs[book.id] = appScope.launch {
+            delay(2000)
+            runCatching { api.putReadingProgress(cloudId, page, now) }
+        }
+    }
+
+    /** 从后端拉所有云端书的进度，比本地新的就覆盖（LWW）。 */
+    private suspend fun syncReadingProgressFromServer() {
+        val list = runCatching { api.getReadingProgressList() }.getOrNull() ?: return
+        if (list.isEmpty()) return
+        val books = library.books().associateBy { it.cloudId }.filterKeys { it != null }
+        for (rp in list) {
+            val page = rp.page ?: continue
+            val at = rp.lastReadAt ?: continue
+            val b = books[rp.bookId] ?: continue
+            val local = library.readingProgress(b.id)
+            if (local == null || at > local.lastReadAt) {
+                library.setReadingProgressAt(b.id, page, at)
             }
         }
     }
@@ -1341,6 +1376,7 @@ class ReaderApp : Application() {
             runCatching { syncFoldersNow() }             // 收藏夹与云端对齐（先补删再并集补建）
             runCatching { library.drainFolderSyncs() }   // 离线期间移动/重命名/删除收藏夹的云端 folder 补同步
             runCatching { syncAllBooks() }
+            runCatching { syncReadingProgressFromServer() }
             // 之后每 5 分钟：补删/补取消/补同步收藏夹照常；译文补拉降频到每 15 分钟，减少 bookPages 请求
             var tick = 0
             while (true) {
@@ -1350,6 +1386,7 @@ class ReaderApp : Application() {
                 runCatching { drainPendingCloudDeletes() }
                 runCatching { syncFoldersNow() }
                 runCatching { library.drainFolderSyncs() }
+                runCatching { syncReadingProgressFromServer() }
                 tick++
                 if (tick % 3 == 0) runCatching { syncAllBooks() }   // 每 3 轮 = 15 分钟
             }

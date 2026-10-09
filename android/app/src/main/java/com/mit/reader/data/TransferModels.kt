@@ -33,3 +33,6 @@ data class DiscoveredDevice(
     val host: String,
     val port: Int,
 )
+
+/** 对端已有这本书（按内容 hash），分享被拦截。 */
+class PeerHasBookException : Exception()
