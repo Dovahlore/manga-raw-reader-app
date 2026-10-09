@@ -667,7 +667,7 @@ async def usage(owner: str = Depends(get_owner)):
 
 @app.get("/v1/admin/overview", dependencies=[Depends(auth)])
 async def admin_overview():
-    """管理平台三模块：后端执行记录 + healthdog + 用户记录（管理员专用）。"""
+    """管理平台两模块：后端执行记录 + 用户记录（管理员专用）。"""
     # ---- 模块一：后端执行记录（引擎健康 + 最近任务 + 最近翻译页）----
     engine_ok, queue_size = False, None
     try:
@@ -700,28 +700,7 @@ async def admin_overview():
         "pages": pages,
     }
 
-    # ---- 模块二：dog（agent 的 token 消耗 + agent 操作日志 + 自愈守护日志）----
-    def _read_log(name: str):
-        p = S.DATA_DIR / name
-        if p.exists():
-            return p.read_text(encoding="utf-8", errors="ignore").splitlines()
-        return []
-
-    agent_lines = await run_in_threadpool(_read_log, "dog.log")
-    watchdog_lines = await run_in_threadpool(_read_log, "healthdog.log")
-    # agent token 消耗：解析 dog.log 里的 "agent 消耗: ..." 行
-    agent_token = []
-    for line in agent_lines:
-        m = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*agent 消耗: (.+)', line)
-        if m:
-            agent_token.append({"time": m.group(1), "usage": m.group(2)})
-    dog = {
-        "agent_token": agent_token,
-        "agent_log": agent_lines[-500:],
-        "watchdog_log": watchdog_lines[-500:],
-    }
-
-    # ---- 模块三：用户记录（每个用户 + 每本书 + 全局统计）----
+    # ---- 模块二：用户记录（每个用户 + 每本书 + 全局统计）----
     users = await run_in_threadpool(
         db.query,
         "SELECT id, name, token_used, page_count, created_at, last_active_at "
@@ -743,7 +722,7 @@ async def admin_overview():
         "(SELECT COALESCE(SUM(token_used),0) FROM users) AS tokens")
     users_mod = {"users": users, "books": books, "stats": stats or {}}
 
-    return {"backend": backend, "dog": dog, "users": users_mod}
+    return {"backend": backend, "users": users_mod}
 
 
 @app.get("/dashboard", include_in_schema=False)
