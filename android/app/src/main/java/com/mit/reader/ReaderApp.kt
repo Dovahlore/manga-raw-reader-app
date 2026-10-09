@@ -1442,8 +1442,9 @@ class ReaderApp : Application() {
             val o = cbArr.getJSONObject(i)
             o.optString("hash").takeIf { it.isNotBlank() }?.let { cloudIdByHash[it] = o.getString("id") }
         }
-        for (b in books.filter { it.cloudId == null && it.hash.isNotEmpty() }) {
-            cloudIdByHash[b.hash]?.let { runCatching { library.attachCloudId(b.id, it) } }
+        for (b in books.filter { it.hash.isNotEmpty() }) {
+            val cid = cloudIdByHash[b.hash] ?: continue
+            if (b.cloudId != cid) runCatching { library.attachCloudId(b.id, cid) }   // 修正旧的 UUID cloudId → hash
         }
 
         // 拉：译文状态 → 差异下载

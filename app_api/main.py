@@ -1533,7 +1533,7 @@ async def cloud_upload(req: Request, owner: str = Depends(get_owner),
     existed = existing is not None
 
     if not book_id:
-        book_id = str(uuid.uuid4())
+        book_id = hash_   # 云端书 id 统一用内容 hash（本地书/云端书同一 key，跨设备共享）
         folder_id = None
         if folder:
             folder_id = await run_in_threadpool(_upsert_folder, owner, folder)

@@ -992,7 +992,7 @@ class LibraryRepository(private val context: Context) {
                 hash = book.hash.ifBlank { sha256(epubFile(book.id)) },
                 fingerprint = book.fingerprint,
                 pageCount = book.pageCount,
-                oldBookId = book.id,   // 先翻译后同步：把本地 UUID 下的旧译文迁到 cloudId
+                oldBookId = book.serverId,   // 先翻译后同步：旧译文在 serverId（本地书=hash）下，迁到云端 id
                 onProgress = { sent, total -> onProgress?.invoke("上传中…", if (total > 0) sent.toFloat() / total else null) },
             )
             // 缓存封面：删本地后云端 tab 仍能显示封面
