@@ -142,7 +142,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 Text(result, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 12.dp))
             }
             app.backgroundActions["ping-server"]?.let { action ->
-                val pingError = action.message.contains("失败") || action.message.contains("未连接")
+                val pingError = action.message.contains("失败") && !action.message.contains("未连接")
                 Text(
                     if (action.running) "正在测试连接…" else action.message,
                     style = MaterialTheme.typography.bodySmall,

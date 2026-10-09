@@ -310,7 +310,7 @@ class TranslationApi {
                 val text = resp.body?.string().orEmpty()
                 if (resp.isSuccessful) "OK: ${text.take(120)}" else "HTTP ${resp.code}: ${text.take(120)}"
             }
-        }.getOrElse { "连接失败: ${it.message}" }
+        }.getOrElse { if (it is java.io.IOException) "未连接" else "连接失败: ${it.message}" }
     }
 
     // ---------------------------------------------------------------- 云同步

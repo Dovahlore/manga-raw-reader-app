@@ -989,8 +989,8 @@ class ReaderApp : Application() {
     fun checkForUpdate(manual: Boolean) {
         if (updateChecking) return
         if (manual && !isNetworkAvailable()) {
-            updateMessage = "未连接网络"
-            updateError = true
+            updateMessage = "未连接"
+            updateError = false
             return
         }
         updateChecking = true
@@ -1010,7 +1010,7 @@ class ReaderApp : Application() {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: java.io.IOException) {
-                if (manual) { updateMessage = "未连接，请检查网络或服务器地址"; updateError = true }
+                if (manual) { updateMessage = "未连接"; updateError = false }
             } catch (e: Exception) {
                 if (manual) { updateMessage = "检查失败：${e.message}"; updateError = true }
             } finally {
@@ -1050,8 +1050,8 @@ class ReaderApp : Application() {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: java.io.IOException) {
-                updateMessage = "未连接，请检查网络或服务器地址"
-                updateError = true
+                updateMessage = "未连接"
+                updateError = false
             } catch (e: Exception) {
                 updateMessage = "下载失败：${e.message}"
                 updateError = true
