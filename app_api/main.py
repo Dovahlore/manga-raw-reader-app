@@ -1788,10 +1788,14 @@ async def sync(body: dict, owner: str = Depends(get_owner)):
     """一次性双向同步（专用批量接口，替代几十个 N+1 请求）：
     推：批量 upsert 书元数据、LWW 阅读进度、应用补删/补取消/补删云端/夹移动；
     拉：返回云端书、远端进度、译文状态、收藏夹。"""
-    # 1) 补删本地书（级联删翻译结果 + 磁盘）
+    # 1) 补删本地书（先停后台任务，再级联删翻译结果 + 磁盘）
     for bid in body.get("deletes") or []:
         if not bid:
             continue
+        await run_in_threadpool(
+            db.execute,
+            "UPDATE jobs SET status='cancelled', finished_at=NOW() "
+            "WHERE book_id=%s AND owner=%s AND status IN ('queued','running')", (bid, owner))
         await run_in_threadpool(db.execute, "DELETE FROM books WHERE id=%s AND owner=%s", (bid, owner))
         await run_in_threadpool(_rmtree_safe, S.BOOKS_DIR / _safe(bid))
         _mark_book_deleted(bid)
@@ -1803,11 +1807,16 @@ async def sync(body: dict, owner: str = Depends(get_owner)):
             db.execute,
             "UPDATE jobs SET status='cancelled', finished_at=NOW() "
             "WHERE book_id=%s AND status IN ('queued','running')", (bid,))
-    # 3) 补删云端书
+    # 3) 补删云端书（删云端 zip + books 记录 + 磁盘页文件，与 /v1/cloud/books 删除一致）
     for cid in body.get("cloud_deletes") or []:
         if not cid:
             continue
+        row = await run_in_threadpool(
+            db.query_one,
+            "SELECT zip_path FROM books WHERE id=%s AND owner=%s AND zip_path IS NOT NULL", (cid, owner))
         await run_in_threadpool(db.execute, "DELETE FROM books WHERE id=%s AND owner=%s", (cid, owner))
+        if row and row["zip_path"]:
+            await run_in_threadpool(_rmtree_safe, Path(row["zip_path"]).parent)
         await run_in_threadpool(_rmtree_safe, S.BOOKS_DIR / _safe(cid))
         _mark_book_deleted(cid)
     # 4) 夹移动
@@ -1872,7 +1881,8 @@ async def sync(body: dict, owner: str = Depends(get_owner)):
         for r in rows:
             by_book.setdefault(r["book_id"], []).append({
                 "id": r["id"], "page_index": r["page_index"], "status": r["status"],
-                "config_hash": r["config_hash"], "updated_at": str(r["updated_at"]),
+                "config_hash": r["config_hash"],
+                "updated_at": r["updated_at"].isoformat() if hasattr(r["updated_at"], "isoformat") else str(r["updated_at"]),
             })
         translation = [{"book_id": k, "pages": v} for k, v in by_book.items()]
     folders = await run_in_threadpool(
