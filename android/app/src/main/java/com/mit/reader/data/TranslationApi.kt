@@ -57,11 +57,6 @@ data class AppUpdate(
     val minVersionCode: Int = 0,
     val downloadPath: String = "",
 )
-data class ReadingProgressResp(
-    val hash: String,
-    val page: Int?,
-    val lastReadAt: Long?,
-)
 data class UsageInfo(
     val userId: String,
     val tokenUsed: Long,
@@ -307,25 +302,6 @@ class TranslationApi {
             }
         }
 
-    /** 拉取当前账号所有云端书的阅读进度。 */
-    suspend fun getReadingProgressList(): List<ReadingProgressResp> =
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            val req = Request.Builder().url("$base/v1/reading-progress").authed().build()
-            client.newCall(req).execute().use { resp ->
-                val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
-                val arr = JSONObject(text).optJSONArray("progress") ?: JSONArray()
-                (0 until arr.length()).map { i ->
-                    val o = arr.getJSONObject(i)
-                    ReadingProgressResp(
-                        hash = o.getString("hash"),
-                        page = if (o.isNull("page")) null else o.optInt("page"),
-                        lastReadAt = if (o.isNull("last_read_at")) null else o.optLong("last_read_at"),
-                    )
-                }
-            }
-        }
-
     /** 上报/更新书元数据（本地书也注册，便于管理平台展示 + 跨设备翻译去重）。 */
     suspend fun upsertBook(bookId: String, title: String, pageCount: Int, orderDir: String, hash: String): Boolean =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -424,20 +400,6 @@ class TranslationApi {
             CloudUploadResp(j.getString("book_id"), j.optBoolean("existed", false))
         }
     }
-
-    /** 按内容 hash 查云端是否已有同内容书，返回 cloudId（无则 null）。 */
-    suspend fun cloudLookup(hash: String): String? =
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            if (hash.isBlank()) return@withContext null
-            val req = Request.Builder().url("$base/v1/cloud/books/lookup?hash=$hash").authed().build()
-            runCatching {
-                client.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) return@runCatching null
-                    val j = JSONObject(resp.body?.string().orEmpty())
-                    if (j.isNull("book_id")) null else j.optString("book_id").takeIf { it.isNotBlank() }
-                }
-            }.getOrNull()
-        }
 
     /** 拉当前账号的云端书列表。 */
     suspend fun cloudList(): List<CloudBook> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {

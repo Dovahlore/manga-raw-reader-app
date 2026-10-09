@@ -1190,28 +1190,7 @@ class ReaderApp : Application() {
         }
     }
 
-    /** 双向同步所有书（按 hash）的进度：远端更新的拉下来，本地更新的推上去（离线读过的也能补推）。 */
-    private suspend fun syncReadingProgressFromServer() {
-        val list = runCatching { api.getReadingProgressList() }.getOrNull() ?: return
-        val remote = mutableMapOf<String, Pair<Int, Long>>()
-        for (rp in list) {
-            val page = rp.page ?: continue
-            val at = rp.lastReadAt ?: continue
-            remote[rp.hash] = page to at
-        }
-        for (b in library.books().filter { it.hash.isNotEmpty() }) {
-            val local = library.readingProgress(b.id)
-            val r = remote[b.hash]
-            when {
-                r != null && (local == null || r.second > local.lastReadAt) ->
-                    library.setReadingProgressAt(b.id, r.first, r.second)          // 拉远端更新的
-                local != null && (r == null || local.lastReadAt > r.second) ->
-                    runCatching { api.putReadingProgress(b.hash, local.page, local.lastReadAt) }  // 推本地更新的
-            }
-        }
-    }
-
-    /** 导入后立刻上报书元数据（本地书也注册；离线静默失败，后续 syncBookMetadata 补）。 */
+    /** 导入后立刻上报书元数据（本地书也注册；离线静默失败，后续批量同步补）。 */
     fun registerBookMetadata(book: Book) {
         if (book.cloudId != null) return   // 云端书走 cloud/books，不重复注册
         appScope.launch {
@@ -1219,27 +1198,6 @@ class ReaderApp : Application() {
                 api.upsertBook(book.serverId, book.title, book.pageCount,
                     if (book.mode == ReadingMode.MANGA) "rtl" else "ltr", book.hash)
             }
-        }
-    }
-
-    /** 补上报本地书元数据（幂等；离线导入的书联网后补进后端 DB）。 */
-    private suspend fun syncBookMetadata() {
-        for (b in library.books().filter { it.cloudId == null && it.hash.isNotEmpty() }) {
-            runCatching {
-                api.upsertBook(b.serverId, b.title, b.pageCount,
-                    if (b.mode == ReadingMode.MANGA) "rtl" else "ltr", b.hash)
-            }
-        }
-    }
-
-    /** 本地书按内容 hash 匹配已有云端书并挂 cloudId（离线导入的书联网后补挂，之后能拉云端译文）。 */
-    private suspend fun syncCloudIdMatch() {
-        val list = runCatching { api.cloudList() }.getOrNull() ?: return
-        val byHash = list.mapNotNull { c -> c.hash?.takeIf { it.isNotBlank() }?.let { it to c.id } }.toMap()
-        if (byHash.isEmpty()) return
-        for (b in library.books().filter { it.cloudId == null && it.hash.isNotEmpty() }) {
-            val cid = byHash[b.hash] ?: continue
-            runCatching { library.attachCloudId(b.id, cid) }
         }
     }
 
@@ -1540,21 +1498,6 @@ class ReaderApp : Application() {
         }
     }
 
-    private suspend fun syncAllBooks() {
-        val books = storageGate.withLock { library.books() }
-        if (books.isEmpty()) return
-        syncingTranslations = true
-        try {
-            for (b in books) {
-                // 正在全书翻译的由 translateWholeBook 下载，跳过避免并发写同一文件
-                if (b.id in translateQueue) continue
-                runCatching { storageGate.withLock { library.refreshTranslations(b, overwrite = false) } }
-            }
-        } finally {
-            syncingTranslations = false
-        }
-    }
-
     // ---- 离线删书补删：删本地时服务端删除失败（离线/网络抖），记下 book id，下次在线补删，避免 DB 残留 ----
 
     private fun pendingDeletes(): MutableList<String> {
@@ -1575,17 +1518,6 @@ class ReaderApp : Application() {
         val list = pendingDeletes()
         if (serverBookId !in list) list.add(serverBookId)
         persistPendingDeletes(list)
-    }
-
-    private suspend fun drainPendingDeletes() {
-        val ids = pendingDeletes()
-        if (ids.isEmpty()) return
-        val remaining = mutableListOf<String>()
-        for (id in ids) {
-            val ok = runCatching { api.deleteBook(id) }.getOrDefault(false)
-            if (!ok) remaining.add(id)
-        }
-        persistPendingDeletes(remaining)
     }
 
     // ---- 离线取消同步 / 删云端书补删：云端删除失败（离线）先记下 cloudId，下次在线补删 ----
@@ -1610,23 +1542,6 @@ class ReaderApp : Application() {
         persistPendingCloudDeletes(list)
     }
 
-    private suspend fun drainPendingCloudDeletes() {
-        val ids = pendingCloudDeletes()
-        if (ids.isEmpty()) return
-        val remaining = mutableListOf<String>()
-        var offline = false
-        for (id in ids) {
-            val ok = !offline && runCatching { api.cloudDelete(id) }.getOrDefault(false)
-            if (ok) {
-                runCatching { library.cloudCoverFile(id).delete() }
-            } else {
-                offline = true   // 离线：剩下的一起留着，别一条条干等连接超时
-                remaining.add(id)
-            }
-        }
-        persistPendingCloudDeletes(remaining)
-    }
-
     // ---- 离线停止补取消：点停止时服务端取消失败（离线），记下 book id，下次在线补取消，避免服务端继续翻 ----
 
     private fun pendingCancels(): MutableList<String> {
@@ -1647,17 +1562,6 @@ class ReaderApp : Application() {
         val list = pendingCancels()
         if (serverBookId !in list) list.add(serverBookId)
         persistPendingCancels(list)
-    }
-
-    private suspend fun drainPendingCancels() {
-        val ids = pendingCancels()
-        if (ids.isEmpty()) return
-        val remaining = mutableListOf<String>()
-        for (id in ids) {
-            val ok = runCatching { api.cancelBookJobs(id) }.getOrDefault(false)
-            if (!ok) remaining.add(id)
-        }
-        persistPendingCancels(remaining)
     }
 
     /** 进程被杀后，下次打开时接着收尾队列里的书（服务端一直在翻，这里补下载）。 */
