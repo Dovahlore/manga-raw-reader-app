@@ -130,3 +130,26 @@ CREATE TABLE IF NOT EXISTS cloud_folders (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uniq_owner_folder (owner, name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============================================================
+-- App 自动更新发布表：App 启动/设置页查 /v1/app/update 拉最新版本。
+-- 发布 = 把 APK 放进 /data/releases（挂载卷）+ 插一行；接口实时查库，无需重启容器。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS app_releases (
+  id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+  version_code     INT NOT NULL,
+  version_name     VARCHAR(64) NOT NULL,
+  channel          VARCHAR(16) NOT NULL DEFAULT 'stable',   -- stable / beta
+  platform         VARCHAR(16) NOT NULL DEFAULT 'android',  -- android（Quest 同 android）
+  abi              VARCHAR(32) NOT NULL DEFAULT 'universal',-- arm64-v8a / universal
+  min_version_code INT NOT NULL DEFAULT 0,                  -- 低于此版本强制更新
+  `force`          TINYINT(1) NOT NULL DEFAULT 0,           -- force 是 MySQL 保留字，需反引号
+  changelog        TEXT NULL,
+  file_path        VARCHAR(512) NOT NULL,                   -- 相对 /data/releases 的文件名
+  size             BIGINT NOT NULL,
+  sha256           CHAR(64) NOT NULL,
+  enabled          TINYINT(1) NOT NULL DEFAULT 1,           -- 发布/下架开关（回滚用）
+  created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_release (channel, platform, abi, version_code),
+  KEY idx_latest (channel, platform, abi, enabled, version_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -20,8 +20,8 @@ android {
         applicationId = "com.mit.reader"
         minSdk = 26
         targetSdk = 34
-        versionCode = 6
-        versionName = "1.3"
+        versionCode = 7
+        versionName = "1.4"
     }
 
     signingConfigs {
@@ -51,6 +51,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -75,4 +76,6 @@ dependencies {
     // 漫画压缩包 CBR(RAR4/RAR5) 解压；CBZ(ZIP) 用 JDK 自带 java.util.zip
     // 注意：junrar 不支持 RAR5（会抛 UnsupportedRarV5Exception），所以用纯 Java 的 unrar5j
     implementation("io.github.realburst:unrar5j:v2.0.4")
+    // 设备对传书：接收方起本地 HTTP 服务（NSD 发现 + 直连传输）
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
 }

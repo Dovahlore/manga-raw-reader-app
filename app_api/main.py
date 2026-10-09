@@ -11,6 +11,7 @@ import asyncio
 import base64
 import copy
 import hashlib
+import heapq
 import io
 import json
 import re
@@ -35,7 +36,51 @@ from . import settings as S
 # ---------------------------------------------------------------- 基础设施
 
 _redis: Optional[aioredis.Redis] = None
-_engine_sem = asyncio.Semaphore(1)          # 引擎是单 worker（GPU 独占），这里排队
+_ENGINE_PRIORITY_INTERACTIVE = 0
+_ENGINE_PRIORITY_WHOLE_BOOK = 10
+
+
+class PrioritySemaphore:
+    def __init__(self, capacity: int = 1):
+        self._capacity = capacity
+        self._active = 0
+        self._sequence = 0
+        self._waiters = []
+        self._condition = asyncio.Condition()
+
+    def _wake_next_locked(self) -> None:
+        while self._active < self._capacity and self._waiters:
+            _, _, future = heapq.heappop(self._waiters)
+            if not future.done():
+                self._active += 1
+                future.set_result(None)
+                self._condition.notify_all()
+                return
+
+    @asynccontextmanager
+    async def acquire(self, priority: int = 0):
+        future = asyncio.get_running_loop().create_future()
+        try:
+            async with self._condition:
+                self._sequence += 1
+                heapq.heappush(self._waiters, (priority, self._sequence, future))
+                self._wake_next_locked()
+                while not future.done():
+                    await self._condition.wait()
+            await future
+            yield
+        except BaseException:
+            if not future.done():
+                future.cancel()
+            raise
+        finally:
+            if future.done() and not future.cancelled():
+                async with self._condition:
+                    self._active -= 1
+                    self._wake_next_locked()
+
+
+_engine_sem = PrioritySemaphore(1)
 _book_locks: Dict[str, asyncio.Lock] = {}   # 同一本书的页串行，保证上下文顺序
 _whole_book_queue: asyncio.Queue = asyncio.Queue()   # 所有用户共享全书 FIFO：单 GPU 一次只跑一本
 
@@ -62,6 +107,7 @@ async def lifespan(app: FastAPI):
     global _redis
     S.CACHE_DIR.mkdir(parents=True, exist_ok=True)
     S.BOOKS_DIR.mkdir(parents=True, exist_ok=True)
+    S.RELEASES_DIR.mkdir(parents=True, exist_ok=True)
     n = await run_in_threadpool(db.init_schema)
     print(f"[app-api] 数据库就绪，执行了 {n} 条 DDL", flush=True)
     # 容器重启后，内存里的任务队列与后台协程都没了：把遗留的 queued/running 任务标记为中断，
@@ -298,10 +344,13 @@ def get_book_lock(book_id: str) -> asyncio.Lock:
     return lock
 
 
-async def call_engine(image_bytes: bytes, cfg: dict) -> dict:
+async def call_engine(image_bytes: bytes, cfg: dict, include_background: bool = False) -> dict:
     """调用引擎的一条龙接口（一次管线运行同时拿译文图 + 结构化结果）。"""
     files = {"image": ("page.png", image_bytes, "image/png")}
-    data = {"config": json.dumps(cfg, ensure_ascii=False)}
+    data = {
+        "config": json.dumps(cfg, ensure_ascii=False),
+        "include_background": "true" if include_background else "false",
+    }
     timeout = httpx.Timeout(S.ENGINE_TIMEOUT, connect=20.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(f"{S.ENGINE_URL}/translate/with-form/page", files=files, data=data)
@@ -436,6 +485,10 @@ def normalize_blocks(result: dict, target_lang: str = "CHS", include_background:
             item["background"] = b.get("background")
         blocks.append(item)
     return blocks
+
+
+def result_cache_hash(cfg: dict, include_background: bool = False) -> str:
+    return pipeline_hash(cfg) + (":bg" if include_background else "")
 
 
 def _to_webp_lossless(data: bytes) -> bytes:
@@ -755,7 +808,7 @@ async def translate_page(
         ctx_source = "none"
 
     img_sha = sha1_bytes(raw)
-    cfg_hash = pipeline_hash(cfg)
+    cfg_hash = result_cache_hash(cfg, include_background)
     cache_key = f"{img_sha}:{cfg_hash}"
     png_path = S.CACHE_DIR / f"{cache_key}.png"   # 图片缓存：本地磁盘
     redis_key = _cache_key(img_sha, cfg_hash)     # 结构化结果缓存：Redis
@@ -810,7 +863,8 @@ async def _run_translate_job(job_id, owner, raw, cfg, real_book_id, real_page_in
 
 async def _execute_translate(raw, cfg, owner, real_book_id, real_page_index, order_dir, title,
                              img_sha, cfg_hash, cache_key, png_path, redis_key,
-                             ctx_source, include_background, force) -> dict:
+                             ctx_source, include_background, force,
+                             priority: int = _ENGINE_PRIORITY_INTERACTIVE) -> dict:
     """跑缓存检查 → 命中直接回，未命中跑整条管线并落库。返回 _page_response 的 dict。"""
     t0 = time.time()
     # 同一本书串行：既保证上下文顺序，也避免"同页并发落库"竞态
@@ -852,9 +906,9 @@ async def _execute_translate(raw, cfg, owner, real_book_id, real_page_index, ord
                                       real_book_id, real_page_index, img_sha)
 
         # ---- 未命中：真正跑一次管线（引擎单 worker，信号量串行）----
-        async with _engine_sem:
+        async with _engine_sem.acquire(priority=priority):
             try:
-                data = await call_engine(raw, cfg)
+                data = await call_engine(raw, cfg, include_background=include_background)
                 # 跑引擎期间书可能被删/取消同步：结果不再落库（墓碑）
                 if _is_book_deleted(real_book_id):
                     raise HTTPException(404, detail="book deleted")
@@ -864,10 +918,9 @@ async def _execute_translate(raw, cfg, owner, real_book_id, real_page_index, ord
                 if not ok_img:
                     raise HTTPException(502, detail=why)
                 result = data.get("result") or {}
-                blocks = normalize_blocks(result, cfg["translator"]["target_lang"], include_background=True)
+                blocks = normalize_blocks(result, cfg["translator"]["target_lang"], include_background=include_background)
                 payload = {
                     "blocks": blocks,
-                    "raw_result": result,
                     "config": {k: v for k, v in cfg.items() if k != "context_text"},
                     "context_used": ctx_source,
                     "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1050,7 +1103,7 @@ async def retranslate(page_id: int, body: Optional[dict] = None, owner: str = De
     if ctx_text:
         cfg["context_text"] = ctx_text
 
-    async with get_book_lock(row["book_id"]), _engine_sem:
+    async with get_book_lock(row["book_id"]), _engine_sem.acquire():
         data = await call_engine(raw, cfg)
         if _is_book_deleted(row["book_id"]):
             raise HTTPException(404, detail="book deleted")
@@ -1221,7 +1274,8 @@ async def _run_translate_all(job_id, owner, book_id, title, order_dir, cfg, indi
             try:
                 await _execute_translate(raw, cfg_page, owner, book_id, idx, order_dir, title,
                                          img_sha, cfg_hash, cache_key, png_path, redis_key,
-                                         ctx_source, False, force)
+                                         ctx_source, False, force,
+                                         priority=_ENGINE_PRIORITY_WHOLE_BOOK)
             except Exception as e:      # noqa: BLE001
                 await run_in_threadpool(
                     _persist_page, book_id, owner, idx, order_dir, title, img_sha, cfg_hash,
@@ -1328,7 +1382,8 @@ async def _run_translate_all_from_zip(job_id, owner, book_id, title, order_dir, 
                 try:
                     await _execute_translate(raw, cfg_page, owner, book_id, idx, order_dir, title,
                                              img_sha, cfg_hash, cache_key, png_path, redis_key,
-                                             ctx_source, False, force)
+                                             ctx_source, False, force,
+                                             priority=_ENGINE_PRIORITY_WHOLE_BOOK)
                 except Exception as e:      # noqa: BLE001
                     await run_in_threadpool(
                         _persist_page, book_id, owner, idx, order_dir, title, img_sha, cfg_hash,
@@ -1399,7 +1454,11 @@ def _rmtree_safe(path: Path) -> None:
 @app.get("/v1/jobs/{job_id}", dependencies=[Depends(auth)])
 async def job_status(job_id: str, owner: str = Depends(get_owner)):
     """任务进度：POST /v1/pages/translate?async=1 后轮询这个。"""
-    row = await run_in_threadpool(db.query_one, "SELECT * FROM jobs WHERE id=%s AND owner=%s", (job_id, owner))
+    row = await run_in_threadpool(
+        db.query_one,
+        "SELECT id, status, page_id, error, attempts FROM jobs WHERE id=%s AND owner=%s",
+        (job_id, owner),
+    )
     if not row:
         raise HTTPException(404, detail="job not found")
     return row
@@ -1623,6 +1682,91 @@ async def cloud_folder_delete(folder_id: int, owner: str = Depends(get_owner)):
     # 软引用：解除该夹下所有云端书的归属
     await run_in_threadpool(db.execute, "UPDATE books SET folder_id=NULL WHERE folder_id=%s", (folder_id,))
     return {"ok": True, "folder_id": folder_id}
+
+
+# ---------------------------------------------------------------- App 自动更新
+# 版本检测实时查库（不缓存）；APK 放 /data/releases（挂载卷），上传接口写入即发布，免重启容器。
+
+@app.get("/v1/app/update")
+async def app_update(
+    platform: str = Query("android"),
+    channel: str = Query("stable"),
+    abi: str = Query("universal"),
+    version_code: int = Query(0),
+):
+    row = await run_in_threadpool(
+        db.query_one,
+        "SELECT id, version_code, version_name, changelog, file_path, size, sha256, `force`, min_version_code "
+        "FROM app_releases WHERE platform=%s AND channel=%s AND abi IN (%s, 'universal') AND enabled=1 AND version_code > %s "
+        "ORDER BY version_code DESC LIMIT 1",
+        (platform, channel, abi, version_code),
+    )
+    if not row:
+        return {"latest": False, "version_code": version_code}
+    forced = bool(row["force"]) or version_code < int(row["min_version_code"] or 0)
+    return {
+        "latest": True,
+        "version_code": row["version_code"],
+        "version_name": row["version_name"],
+        "changelog": row["changelog"] or "",
+        "size": row["size"],
+        "sha256": row["sha256"],
+        "force": forced,
+        "min_version_code": row["min_version_code"],
+        "download_path": f"/v1/app/releases/{row['id']}/download",
+    }
+
+
+@app.get("/v1/app/releases/{release_id}/download")
+async def app_release_download(release_id: int):
+    row = await run_in_threadpool(
+        db.query_one, "SELECT file_path FROM app_releases WHERE id=%s AND enabled=1", (release_id,))
+    if not row:
+        raise HTTPException(404, detail="release not found")
+    root = S.RELEASES_DIR.resolve()
+    p = (S.RELEASES_DIR / row["file_path"]).resolve()
+    if not str(p).startswith(str(root)) or not p.is_file():
+        raise HTTPException(404, detail="release file missing")
+    return FileResponse(p, filename=p.name)
+
+
+@app.post("/v1/app/releases", dependencies=[Depends(auth)])
+async def app_release_upload(
+    version_code: int = Form(...),
+    version_name: str = Form(...),
+    file: UploadFile = File(...),
+    channel: str = Form("stable"),
+    platform: str = Form("android"),
+    abi: str = Form("universal"),
+    force: bool = Form(False),
+    min_version_code: int = Form(0),
+    changelog: str = Form(""),
+):
+    """上传新版本 APK 并发布（幂等：同 (channel,platform,abi,version_code) 覆盖）。
+    文件落到挂载卷 /data/releases，接口实时查库，因此发布无需重启容器。"""
+    if version_code <= 0:
+        raise HTTPException(400, detail="version_code 必须 > 0")
+    data = await file.read()
+    if len(data) < 1024:
+        raise HTTPException(400, detail="APK 文件无效")
+    sha = hashlib.sha256(data).hexdigest()
+    safe_channel = re.sub(r"[^a-zA-Z0-9_-]", "", channel) or "stable"
+    safe_abi = re.sub(r"[^a-zA-Z0-9_-]", "", abi) or "universal"
+    fname = f"app-{safe_channel}-{safe_abi}-{version_code}.apk"
+    dest = S.RELEASES_DIR / fname
+    with open(dest, "wb") as f:
+        f.write(data)
+    await run_in_threadpool(
+        db.execute,
+        "INSERT INTO app_releases (version_code, version_name, channel, platform, abi, min_version_code, "
+        "`force`, changelog, file_path, size, sha256) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+        "ON DUPLICATE KEY UPDATE version_name=VALUES(version_name), min_version_code=VALUES(min_version_code), "
+        "`force`=VALUES(`force`), changelog=VALUES(changelog), file_path=VALUES(file_path), "
+        "size=VALUES(size), sha256=VALUES(sha256), enabled=1",
+        (version_code, version_name, safe_channel, platform, safe_abi, min_version_code,
+         int(force), changelog, fname, len(data), sha),
+    )
+    return {"ok": True, "version_code": version_code, "size": len(data), "sha256": sha, "file": fname}
 
 
 @app.get("/", include_in_schema=False)

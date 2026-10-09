@@ -3,21 +3,27 @@ package com.mit.reader.ui
 import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -27,15 +33,15 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
+import com.mit.reader.BuildConfig
 import com.mit.reader.ReaderApp
 import com.mit.reader.data.ServerConfig
-import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -45,10 +51,16 @@ fun SettingsScreen(onBack: () -> Unit) {
     var url by remember { mutableStateOf(ServerConfig.baseUrl) }
     var key by remember { mutableStateOf(ServerConfig.apiKey) }
     var result by remember { mutableStateOf("") }
-    var usageText by remember { mutableStateOf("") }
+    val usageText = app.accountUsageText
     var folderName by remember { mutableStateOf(ServerConfig.libraryFolderName) }
-    var scanResult by remember { mutableStateOf("") }
-    val scope = rememberCoroutineScope()
+    var storageResult by remember { mutableStateOf("") }
+    var storagePickerOpen by remember { mutableStateOf(false) }
+    var pendingStoragePath by remember { mutableStateOf(app.currentLibraryStorageDir) }
+    val scanStatus = app.libraryScanStatus
+    val storageOptions = app.libraryStorageOptions()
+    val currentStorageOption = storageOptions.firstOrNull { it.path == app.currentLibraryStorageDir }
+        ?: storageOptions.first()
+    val storageMigration = app.storageMigrationStatus
 
     // 书库文件夹选择（SAF 树）：拿到权限后持久化，重启不失效
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -59,28 +71,11 @@ fun SettingsScreen(onBack: () -> Unit) {
             val name = runCatching { DocumentFile.fromTreeUri(context, uri)?.name }.getOrNull()
             ServerConfig.libraryFolderName = name
             folderName = name
-            scanResult = if (name != null) "已选择：$name" else "已选择文件夹"
+            storageResult = ""
         }
     }
 
-    LaunchedEffect(Unit) {
-        val sb = StringBuilder()
-        runCatching { app.api.usage() }
-            .onSuccess { u ->
-                sb.appendLine("用户 ID：${u.userId}")
-                sb.appendLine("Token 消耗：${u.tokenUsed}")
-                sb.appendLine("翻页次数：${u.pageCount}")
-                u.lastActiveAt?.let { sb.appendLine("最后活跃：$it") }
-            }
-            .onFailure { sb.appendLine("用量获取失败：${it.message}") }
-        runCatching { app.api.cloudList() }
-            .onSuccess { list ->
-                val totalBytes = list.sumOf { it.size ?: 0L }
-                sb.appendLine("云端书：${list.size} 本 · 占用 ${formatBytes(totalBytes)}")
-            }
-            .onFailure { sb.appendLine("云端用量获取失败：${it.message}") }
-        usageText = sb.toString().trimEnd()
-    }
+    LaunchedEffect(Unit) { app.refreshAccountUsage() }
 
     Scaffold(
         topBar = {
@@ -132,8 +127,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                     onClick = {
                         ServerConfig.baseUrl = url
                         ServerConfig.apiKey = key
-                        result = "测试中…"
-                        scope.launch { result = app.pingAndUpdate() }
+                        app.pingServer()
                     },
                     modifier = Modifier.weight(1f).padding(start = 8.dp),
                 ) { Text("测试连接") }
@@ -146,6 +140,13 @@ fun SettingsScreen(onBack: () -> Unit) {
             ) { Text("恢复局域网默认地址") }
             if (result.isNotBlank()) {
                 Text(result, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 12.dp))
+            }
+            app.backgroundActions["ping-server"]?.let { action ->
+                Text(
+                    if (action.running) "正在测试连接…" else action.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
             }
 
             // ---- 账号用量 ----
@@ -177,22 +178,214 @@ fun SettingsScreen(onBack: () -> Unit) {
             Row(Modifier.padding(top = 8.dp)) {
                 Button(onClick = { folderPicker.launch(null) }, modifier = Modifier.weight(1f)) { Text("选择文件夹") }
                 Button(
-                    onClick = {
-                        scanResult = "扫描中…"
-                        scope.launch {
-                            val n = runCatching { app.library.scanLibraryFolder() }.getOrDefault(-1)
-                            if (n > 0) app.bumpLibrary()   // 新书入库，书库页立即刷新
-                            scanResult = if (n >= 0) "扫描完成，新导入 $n 本" else "扫描失败（离线或无法访问文件夹）"
-                        }
-                    },
-                    enabled = !ServerConfig.libraryFolderUri.isNullOrBlank(),
+                    onClick = app::startLibraryScan,
+                    enabled = !ServerConfig.libraryFolderUri.isNullOrBlank() && scanStatus?.running != true,
                     modifier = Modifier.weight(1f).padding(start = 8.dp),
-                ) { Text("重新扫描") }
+                ) {
+                    if (scanStatus?.running == true) {
+                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Text("扫描中", Modifier.padding(start = 6.dp))
+                    } else {
+                        Text("重新扫描")
+                    }
+                }
             }
-            if (scanResult.isNotBlank()) {
-                Text(scanResult, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
+            if (scanStatus != null) {
+                if (scanStatus.running && scanStatus.total > 0) {
+                    LinearProgressIndicator(
+                        progress = { if (scanStatus.total == 0) 0f else scanStatus.processed.toFloat() / scanStatus.total },
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    )
+                }
+                Text(
+                    scanStatus.text,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+
+            // ---- 数据存储位置 ----
+            Text(
+                "数据存储位置",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 24.dp),
+            )
+            Text(
+                "书库文件夹只作为扫描来源；导入后的页面和译文写入这里。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            app.storageMigrationStatus?.let { migration ->
+                Text(
+                    migration.text,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (migration.running) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+            Text(
+                "当前：${currentStorageOption.label}\n${currentStorageOption.path ?: "App 私有内部数据"}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+            Button(
+                onClick = {
+                    pendingStoragePath = app.currentLibraryStorageDir
+                    storagePickerOpen = true
+                },
+                modifier = Modifier.padding(top = 8.dp),
+            ) { Text("更改存储位置") }
+            TextButton(
+                enabled = storageMigration?.running != true,
+                onClick = app::startManualStorageMigration,
+                modifier = Modifier.padding(top = 4.dp),
+            ) { Text("搬运旧数据到当前位置") }
+            if (storageResult.isNotBlank()) {
+                Text(storageResult, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
+            }
+
+            // ---- 关于与更新 ----
+            Text(
+                "关于与更新",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 24.dp),
+            )
+            Text(
+                "当前版本：${BuildConfig.VERSION_NAME}（${BuildConfig.VERSION_CODE}）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+            Row(Modifier.padding(top = 8.dp)) {
+                Button(
+                    onClick = { app.checkForUpdate(manual = true) },
+                    enabled = !app.updateChecking,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    if (app.updateChecking) {
+                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    } else {
+                        Text("检查更新")
+                    }
+                }
+                if (app.updateInfo != null) {
+                    Button(
+                        onClick = { app.startUpdateDownload() },
+                        enabled = !app.updateDownloading,
+                        modifier = Modifier.weight(1f).padding(start = 8.dp),
+                    ) { Text(if (app.updateDownloading) "下载中…" else "立即更新") }
+                }
+            }
+            app.updateInfo?.let { info ->
+                if (info.changelog.isNotBlank()) {
+                    Text(
+                        "新版 ${info.versionName}（${formatBytes(info.size)}）：${info.changelog}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+                if (app.updateDownloading) {
+                    val (w, t) = app.updateDownloadProgress ?: (0L to 0L)
+                    if (t > 0) {
+                        LinearProgressIndicator(
+                            progress = { (w.toFloat() / t).coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        )
+                        Text(
+                            "${(w * 100 / t).coerceAtMost(100)}% · ${formatBytes(w)} / ${formatBytes(t)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
+                    }
+                }
+            }
+            if (app.updateMessage.isNotBlank()) {
+                Text(
+                    app.updateMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+
+            // ---- 后台导入状态（Application 级，不随页面销毁）----
+            if (app.libraryImports.isNotEmpty()) {
+                Text(
+                    "后台导入",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(top = 24.dp),
+                )
+                app.libraryImports.values.forEach { task ->
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
+                        if (task.running) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Text(
+                            "${task.title}：${task.message}",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(start = if (task.running) 8.dp else 0.dp),
+                        )
+                    }
+                }
             }
         }
+    }
+
+    if (storagePickerOpen) {
+        AlertDialog(
+            onDismissRequest = { storagePickerOpen = false },
+            title = { Text("选择数据存储位置") },
+            text = {
+                Column {
+                    storageOptions.forEach { option ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { pendingStoragePath = option.path }
+                                .padding(vertical = 8.dp),
+                        ) {
+                            RadioButton(
+                                selected = pendingStoragePath == option.path,
+                                onClick = { pendingStoragePath = option.path },
+                            )
+                            Column(Modifier.padding(start = 8.dp)) {
+                                Text(option.label)
+                                Text(
+                                    "可用 ${formatBytes(option.usableBytes)}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Text(
+                                    option.path ?: "App 私有内部数据",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                    Text(
+                        "确认后只切换新导入的位置，不自动搬运；旧书会继续在书库显示。如需搬运，请返回设置点击「搬运旧数据到当前位置」。",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = pendingStoragePath != app.currentLibraryStorageDir,
+                    onClick = {
+                        app.changeLibraryStorage(pendingStoragePath ?: currentStorageOption.path.orEmpty())
+                        storagePickerOpen = false
+                    },
+                ) { Text("确认") }
+            },
+            dismissButton = {
+                TextButton(onClick = { storagePickerOpen = false }) { Text("取消") }
+            },
+        )
     }
 }
 

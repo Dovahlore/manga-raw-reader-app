@@ -46,6 +46,17 @@ data class CloudBook(
     val folder: String?,
 )
 data class CloudFolder(val id: Int, val name: String, val bookCount: Int)
+data class AppUpdate(
+    val latest: Boolean,
+    val versionCode: Int = 0,
+    val versionName: String = "",
+    val changelog: String = "",
+    val size: Long = 0,
+    val sha256: String = "",
+    val force: Boolean = false,
+    val minVersionCode: Int = 0,
+    val downloadPath: String = "",
+)
 data class UsageInfo(
     val userId: String,
     val tokenUsed: Long,
@@ -268,6 +279,29 @@ class TranslationApi {
         }
     }
 
+    /** 检查 App 新版本：GET /v1/app/update（实时查库，无鉴权）。返回最新可用版本信息。 */
+    suspend fun checkUpdate(versionCode: Int, abi: String): AppUpdate =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val url = "$base/v1/app/update?platform=android&channel=stable&abi=$abi&version_code=$versionCode"
+            val req = Request.Builder().url(url).build()
+            client.newCall(req).execute().use { resp ->
+                val text = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${text.take(200)}")
+                val j = JSONObject(text)
+                AppUpdate(
+                    latest = j.optBoolean("latest", false),
+                    versionCode = j.optInt("version_code", 0),
+                    versionName = j.optString("version_name"),
+                    changelog = j.optString("changelog"),
+                    size = j.optLong("size", 0),
+                    sha256 = j.optString("sha256"),
+                    force = j.optBoolean("force", false),
+                    minVersionCode = j.optInt("min_version_code", 0),
+                    downloadPath = j.optString("download_path"),
+                )
+            }
+        }
+
     /** 测连通：GET /v1/health，返回状态说明。 */
     suspend fun ping(): String = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         runCatching {
@@ -380,6 +414,22 @@ class TranslationApi {
             }
         }
     }
+
+    /** 云端新建收藏夹（owner+name 唯一，重名幂等）。离线/失败返回 false，由调用方排队补建。 */
+    suspend fun cloudFolderCreate(name: String): Boolean =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val body = JSONObject().put("name", name).toString()
+                .toRequestBody("application/json".toMediaType())
+            val req = Request.Builder().url("$base/v1/cloud/folders").authed().post(body).build()
+            client.newCall(req).execute().use { it.isSuccessful }
+        }
+
+    /** 删云端收藏夹（夹下云端书回到未分类，书本身不删）。 */
+    suspend fun cloudFolderDelete(folderId: Int): Boolean =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val req = Request.Builder().url("$base/v1/cloud/folders/$folderId").authed().delete().build()
+            client.newCall(req).execute().use { it.isSuccessful }
+        }
 
     /** 下载云端书 zip（还原到本地用）。onProgress: (已下载字节, 总字节)。 */
     suspend fun cloudDownload(cloudId: String, out: File, onProgress: ((Long, Long) -> Unit)? = null) =

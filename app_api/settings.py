@@ -23,6 +23,7 @@ DATA_DIR = Path(os.getenv("MIT_DATA_DIR", "/data"))
 CACHE_DIR = DATA_DIR / "cache" / "result"
 BOOKS_DIR = DATA_DIR / "books"
 CLOUD_DIR = DATA_DIR / "cloud"          # 云端同步的书 zip
+RELEASES_DIR = DATA_DIR / "releases"    # App 安装包（挂载卷，放包即发布，无需重启容器）
 
 # 访问令牌：留空=不校验（仅内网自用时可以留空）
 API_TOKEN = os.getenv("MIT_API_TOKEN", "").strip()

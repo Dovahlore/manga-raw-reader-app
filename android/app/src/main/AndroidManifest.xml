@@ -3,6 +3,12 @@
 
     <!-- 访问后端（局域网/公网）需要网络权限 -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 自更新：安装 APK -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- 设备对传：NSD(mDNS) 发现同一局域网设备需要网络/多播权限 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <application
         android:name=".ReaderApp"
@@ -82,5 +88,16 @@
                 <data android:mimeType="application/vnd.rar" />
             </intent-filter>
         </activity>
+
+        <!-- 自更新：用 FileProvider 暴露下载好的 APK 给系统安装器 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>
