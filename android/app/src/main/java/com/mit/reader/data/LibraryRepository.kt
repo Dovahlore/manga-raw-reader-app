@@ -189,16 +189,20 @@ class LibraryRepository(private val context: Context) {
             val sourceHash = input.use {
                 copyToSourceAndHash(it, stagingFile, precomputedHash.isEmpty())
             }.ifEmpty { precomputedHash }
-            val parsedList = when (sniffFormat(stagingFile)) {
+            val fmt = sniffFormat(stagingFile)
+            val parsedList = when (fmt) {
                 "mobi" -> listOf(MobiParser.extract(stagingFile, File(stagingDir, "vol-0")))
                 // 合集 zip/rar：顶层每个文件夹一本书；单本包 = 1 本
                 "zip", "rar" -> ArchiveParser.extractMulti(stagingFile, stagingDir)
                 else -> listOf(EpubParser.extract(stagingFile, File(stagingDir, "vol-0")))
             }
             val single = parsedList.size == 1
+            // 图片包（zip/rar，无论单本还是合集）都按「页内容」算 hash：与文件夹导入/合集拆书互认去重；
+            // epub/mobi 是重排格式，页是解析出来的，沿用源文件 hash 作稳定身份。
+            val imageArchive = fmt == "zip" || fmt == "rar"
             parsedList.forEachIndexed { i, parsed ->
-                // 合集拆出的每本按「页内容」算 hash（同内容的文件夹导入能互相去重）；单本沿用源文件 hash
-                val hash = if (single) sourceHash else sha256OfPages(parsed.pages)
+                // 已有同 hash 的书 → 跳过这本（合集导入时逐本跳过；全部已有就是纯重复导入）
+                val hash = if (imageArchive) sha256OfPages(parsed.pages) else sourceHash
                 val existing = readIndexData().books.firstOrNull {
                     it.hash.isNotEmpty() && it.hash == hash
                 }
