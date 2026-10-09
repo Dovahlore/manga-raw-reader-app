@@ -757,7 +757,8 @@ class ReaderApp : Application() {
                     }
                 }
                 Toast.makeText(this@ReaderApp, "已同步《${synced.title}》", Toast.LENGTH_SHORT).show()
-                upsertLibraryBook(book)
+                upsertLibraryBook(synced)   // 用同步后的书（带 cloudId），别用旧 book，否则缓存里 cloudId 为空→云端列表又出现一本
+                bumpCloud()
             } catch (e: CancellationException) {
                 throw e   // 应用级作用域被取消=进程退出，不弹「失败」
             } catch (e: Exception) {
