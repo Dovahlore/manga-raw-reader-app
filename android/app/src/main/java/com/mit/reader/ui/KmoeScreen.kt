@@ -30,7 +30,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -75,7 +74,6 @@ private data class PendingDownload(
 fun KmoeScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val app = context.applicationContext as ReaderApp
-    val scope = rememberCoroutineScope()
     var pendingDownload by remember { mutableStateOf<PendingDownload?>(null) }
     // 用普通数组持有 WebView 引用，避免写回 Compose state 触发重组
     val webViewRef = remember { arrayOfNulls<WebView>(1) }
@@ -160,16 +158,14 @@ fun KmoeScreen(onBack: () -> Unit) {
                         }
                         val cookie = CookieManager.getInstance().getCookie(url)
                         val referer = webView.url
-                        scope.launch {
-                            // 下载前查重：本地已有同名书就不弹确认，直接提示跳过
-                            val title = app.library.titleFromFileName(name)
-                            val existing = app.library.bookByTitle(title)
-                            if (existing != null) {
-                                Toast.makeText(context, "本地已有《${existing.title}》，跳过下载", Toast.LENGTH_SHORT).show()
-                                return@launch
-                            }
-                            pendingDownload = PendingDownload(url, name, title, cookie, referer, userAgent)
-                        }
+                        pendingDownload = PendingDownload(
+                            url,
+                            name,
+                            app.library.titleFromFileName(name),
+                            cookie,
+                            referer,
+                            userAgent,
+                        )
                     }
 
                     loadUrl(ServerConfig.kmoeLastUrl ?: KMOE_URL)

@@ -63,10 +63,19 @@ class ReaderViewModel(private val app: Application) : AndroidViewModel(app) {
         // 事件驱动：后台「全书翻译」每下好一页就发事件，这里按书过滤、更新 pageStates（免轮询）
         watchJob?.cancel()
         watchJob = viewModelScope.launch {
-            readerApp.pageTranslated.collect { (bookId, pageIndex) ->
-                if (bookId == b.id && pageIndex in b.pageFiles.indices) {
-                    val f = readerApp.library.translatedCacheFile(b.id, pageIndex)
-                    pageStates[pageIndex] = PageState(status = PageStatus.DONE, translatedFile = f)
+            launch {
+                readerApp.pageTranslated.collect { (bookId, pageIndex) ->
+                    if (bookId == b.id && pageIndex in b.pageFiles.indices) {
+                        val f = readerApp.library.translatedCacheFile(b.id, pageIndex)
+                        pageStates[pageIndex] = PageState(status = PageStatus.DONE, translatedFile = f)
+                    }
+                }
+            }
+            launch {
+                readerApp.pageTranslationFailed.collect { (bookId, pageIndex, error) ->
+                    if (bookId == b.id && pageIndex in b.pageFiles.indices) {
+                        pageStates[pageIndex] = PageState(status = PageStatus.FAILED, error = error)
+                    }
                 }
             }
         }
@@ -75,15 +84,7 @@ class ReaderViewModel(private val app: Application) : AndroidViewModel(app) {
     /** 从服务端补拉译文页到本地（只补缺失/指纹变化的页），再标 DONE。优先拉当前页附近的页。 */
     fun refreshFromServer() {
         val b = book ?: return
-        viewModelScope.launch {
-            val doneIdx = readerApp.library.refreshTranslations(b, overwrite = false, priority = currentPage)
-            for (i in doneIdx) {
-                pageStates[i] = PageState(
-                    status = PageStatus.DONE,
-                    translatedFile = readerApp.library.translatedCacheFile(b.id, i),
-                )
-            }
-        }
+        readerApp.refreshBookFromServer(b)
     }
 
     fun setPage(i: Int) {
@@ -124,49 +125,6 @@ class ReaderViewModel(private val app: Application) : AndroidViewModel(app) {
         if (pageStates[index]?.status == PageStatus.RUNNING) return          // 已在跑
         if (!force && pageStates[index]?.status == PageStatus.DONE) return   // 已翻过
         pageStates[index] = PageState(status = PageStatus.RUNNING)
-
-        viewModelScope.launch {
-            try {
-                // 已同步的书：服务端从云端 zip / orig 自取图，不上传图片
-                val jobId = if (b.cloudId != null) {
-                    readerApp.api.translateFromServer(b.serverId, index, force)
-                } else {
-                    readerApp.api.translate(
-                        image = pages[index],
-                        bookId = b.serverId,
-                        pageIndex = index,
-                        async = true,
-                        force = force,
-                    ).jobId ?: throw IllegalStateException("无 job_id")
-                }
-                // 轮询 job 直到 done / failed（最多 2 分钟）
-                var finished = false
-                var pid = -1
-                var err: String? = null
-                var tries = 0
-                while (!finished && tries < 80) {
-                    val st = readerApp.api.job(jobId)
-                    when (st.status) {
-                        "done" -> { pid = st.pageId ?: -1; finished = true }
-                        "failed" -> { err = st.error ?: "翻译失败"; finished = true }
-                    }
-                    if (!finished) {
-                        delay(1500)
-                        tries++
-                    }
-                }
-                if (!finished) err = "超时：翻译未在 2 分钟内完成"
-                if (err != null) throw IllegalStateException(err)
-                val pageId = pid
-
-                // 下载译文图 → 本地缓存
-                val out = readerApp.library.translatedCacheFile(b.id, index)
-                out.parentFile?.mkdirs()
-                readerApp.api.download(readerApp.api.translatedUrl(pageId), out)
-                pageStates[index] = PageState(status = PageStatus.DONE, translatedFile = out)
-            } catch (e: Exception) {
-                pageStates[index] = PageState(status = PageStatus.FAILED, error = e.message)
-            }
-        }
+        readerApp.translateBookPage(b, index, force)
     }
 }

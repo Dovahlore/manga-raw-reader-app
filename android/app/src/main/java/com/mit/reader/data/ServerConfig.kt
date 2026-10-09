@@ -14,6 +14,7 @@ object ServerConfig {
     private const val KEY_KEY = "api_key"
     private const val KEY_LIB_FOLDER = "library_folder_uri"
     private const val KEY_LIB_FOLDER_NAME = "library_folder_name"
+    private const val KEY_LIBRARY_STORAGE = "library_storage_dir"
 
     private var prefs: SharedPreferences? = null
 
@@ -46,6 +47,13 @@ object ServerConfig {
         get() = prefs?.getString(KEY_LIB_FOLDER_NAME, null)
         set(value) {
             prefs?.edit()?.putString(KEY_LIB_FOLDER_NAME, value)?.apply()
+        }
+
+    /** App 数据保存位置。null = 旧版内部数据目录；可选择 SD 卡上的 App 专用目录。 */
+    var libraryStorageDir: String?
+        get() = prefs?.getString(KEY_LIBRARY_STORAGE, null)
+        set(value) {
+            prefs?.edit()?.putString(KEY_LIBRARY_STORAGE, value)?.apply()
         }
 
     /** Kmoe WebView 上次停留的网址（退出重进恢复页面用）。 */

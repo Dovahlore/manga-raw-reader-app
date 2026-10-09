@@ -1,6 +1,6 @@
 import base64
 import struct
-from typing import Dict, List, Annotated
+from typing import Dict, List, Annotated, Optional
 
 import cv2
 import numpy as np
@@ -43,7 +43,7 @@ class Translation(BaseModel):
     prob: float
     text_color: TextColor
     text: dict[str, str]
-    background: NumpyNdarray = Field(
+    background: Optional[NumpyNdarray] = Field(
         ...,
         description="Background image encoded as a base64 string",
         examples=["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAA..."]
@@ -56,7 +56,9 @@ class Translation(BaseModel):
         }
 
     @staticmethod
-    def encode_background(array: np.ndarray) -> str:
+    def encode_background(array: Optional[np.ndarray]) -> Optional[str]:
+        if array is None or array.size == 0:
+            return None
         retval, buffer = cv2.imencode('.png', array)
         jpg_as_text = base64.b64encode(buffer).decode("utf-8")
         background = f"data:image/png;base64,{jpg_as_text}"
@@ -73,7 +75,8 @@ class Translation(BaseModel):
         for key, value in self.text.items():
             text_bytes += struct.pack('I', len(key.encode('utf-8'))) + key.encode('utf-8')
             text_bytes += struct.pack('I', len(value.encode('utf-8'))) + value.encode('utf-8')
-        background_bytes = struct.pack('I', len(self.background.tobytes())) + self.background.tobytes()
+        background = self.background.tobytes() if self.background is not None and self.background.size else b''
+        background_bytes = struct.pack('I', len(background)) + background
         return coords_bytes +is_bulleted_list_byte+ angle_bytes+prob_bytes+fg + bg + text_bytes + background_bytes
 
 class TranslationResponse(BaseModel):
@@ -84,7 +87,7 @@ class TranslationResponse(BaseModel):
         items= [v.to_bytes() for v in self.translations]
         return struct.pack('i', len(items)) + b''.join(items)
 
-def to_translation(ctx: Context) -> TranslationResponse:
+def to_translation(ctx: Context, include_background: bool = True) -> TranslationResponse:
     # 无文字页（整页插图/跨页图）时 text_regions 是 None，上游这里会
     # TypeError: 'NoneType' object is not iterable -> 引擎 500 -> 调用方 502。
     # 兜底成空列表，让"没有文字"这种正常情况返回 image + 空 translations。
@@ -104,7 +107,7 @@ def to_translation(ctx: Context) -> TranslationResponse:
         color1, color2 = text_region.get_font_colors()
         results.append(Translation(text=trans,
                     minX=int(minX),minY=int(minY),maxX=int(maxX),maxY=int(maxY),
-                    background=inpaint[minY:maxY, minX:maxX],
+                    background=inpaint[minY:maxY, minX:maxX] if include_background else None,
                     is_bulleted_list=text_region.is_bulleted_list,
                     text_color=TextColor(fg=color1.tolist(), bg=color2.tolist()),
                     prob=text_region.prob,

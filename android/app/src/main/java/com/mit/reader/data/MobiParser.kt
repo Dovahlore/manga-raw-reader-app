@@ -119,7 +119,7 @@ object MobiParser {
     // ---------------------------------------------------------------- PalmDOC
 
     private fun decompressPalmDoc(data: ByteArray): ByteArray {
-        val out = ArrayList<Byte>(data.size * 3)
+        val out = GrowableBytes(data.size * 3)
         var i = 0
         val n = data.size
         while (i < n) {
@@ -130,32 +130,71 @@ object MobiParser {
                 c = data[i].toInt() and 0xFF
                 i++
                 when {
-                    c == 0x00 -> out.add(0.toByte())
-                    c == 0x01 -> out.add(1.toByte())
+                    c == 0x00 -> out.append(0)
+                    c == 0x01 -> out.append(1)
                     c in 0x02..0x08 -> {
                         if (i + 1 >= n) break
                         val dist = ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
                         i += 2
-                        repeat(c) {
-                            val src = out.size - dist
-                            out.add(if (src >= 0 && src < out.size) out[src] else 0.toByte())
-                        }
+                        out.copyFromEnd(dist, c)
                     }
-                    c in 0x09..0x7F -> out.add(c.toByte())
+                    c in 0x09..0x7F -> out.append(c)
                     c in 0x80..0xBF -> {
-                        out.add(0x20)
-                        out.add((c xor 0x80).toByte())
+                        out.append(0x20)
+                        out.append(c xor 0x80)
                     }
-                    else -> out.add((c xor 0x80).toByte())
+                    else -> out.append(c xor 0x80)
                 }
             } else if (c in 0x01..0x08) {
                 // 字面串：接下来 c 个字节原样输出
-                repeat(c) { out.add(if (i < n) data[i++] else 0.toByte()) }
+                out.appendLiteral(data, i, c)
+                i += c
             } else {
-                out.add(c.toByte())
+                out.append(c)
             }
         }
         return out.toByteArray()
+    }
+
+    private class GrowableBytes(initialCapacity: Int) {
+        private var buffer = ByteArray(initialCapacity.coerceAtLeast(64))
+        private var length = 0
+
+        fun append(value: Int) {
+            ensureCapacity(1)
+            buffer[length++] = value.toByte()
+        }
+
+        fun appendLiteral(source: ByteArray, offset: Int, count: Int) {
+            val available = (source.size - offset).coerceAtLeast(0).coerceAtMost(count)
+            if (available > 0) {
+                ensureCapacity(available)
+                System.arraycopy(source, offset, buffer, length, available)
+                length += available
+            }
+            repeat(count - available) { append(0) }
+        }
+
+        fun copyFromEnd(distance: Int, count: Int) {
+            if (distance <= 0) {
+                repeat(count) { append(0) }
+                return
+            }
+            repeat(count) {
+                val source = length - distance
+                append(if (source >= 0) buffer[source].toInt() and 0xFF else 0)
+            }
+        }
+
+        fun toByteArray(): ByteArray = buffer.copyOf(length)
+
+        private fun ensureCapacity(extra: Int) {
+            val required = length + extra
+            if (required <= buffer.size) return
+            var newSize = buffer.size
+            while (newSize < required) newSize *= 2
+            buffer = buffer.copyOf(newSize)
+        }
     }
 
     // ---------------------------------------------------------------- 图片

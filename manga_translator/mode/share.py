@@ -1,4 +1,5 @@
 import asyncio
+import ctypes
 import gc
 import os
 import pickle
@@ -52,6 +53,22 @@ def restricted_loads(data: bytes):
 class MethodCall(BaseModel):
     method_name: str
     attributes: bytes
+
+
+def release_worker_memory():
+    gc.collect()
+    try:
+        import torch
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+    try:
+        libc = ctypes.CDLL(None)
+        libc.malloc_trim.argtypes = [ctypes.c_size_t]
+        libc.malloc_trim.restype = ctypes.c_int
+        libc.malloc_trim(0)
+    except Exception:
+        pass
 
 
 
@@ -131,12 +148,7 @@ class MangaShare:
         finally:
             self.lock.release()
             # 每页翻完释放图片/中间张量：全书翻译连翻几百页，不释放会无界累积把 VM 内存吃爆
-            gc.collect()
-            try:
-                import torch
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
+            release_worker_memory()
 
 
     def check_nonce(self, request: Request):
@@ -192,12 +204,7 @@ class MangaShare:
             finally:
                 # 每页翻完立刻释放图片/中间张量，避免全书翻译时内存无界累积
                 del result
-                gc.collect()
-                try:
-                    import torch
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
+                release_worker_memory()
 
         @app.post("/execute/{method_name}")
         async def execute_method(request: Request, method_name: str = Path(...)):

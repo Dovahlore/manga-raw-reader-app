@@ -70,6 +70,7 @@ services:
       - path: ${MIT_SECRET_ENV:-./secret.env}
         required: false
     environment:
+      MALLOC_ARENA_MAX: "2"
       HF_HOME: /app/models/hf
       # 国内必配：HF 走镜像；HF_URL_MIRROR 管代码里硬编码的直链（utils/generic.py）
       HF_ENDPOINT: ${MIT_HF_ENDPOINT:-https://hf-mirror.com}

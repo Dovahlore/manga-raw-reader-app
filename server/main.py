@@ -137,7 +137,8 @@ class PageTranslateResponse(BaseModel):
 
 @app.post("/translate/with-form/page", response_model=PageTranslateResponse, tags=["api", "form"],
           response_description="one-shot: translated image (base64) + structured translations")
-async def page_form(req: Request, image: UploadFile = File(...), config: str = Form("{}")):
+async def page_form(req: Request, image: UploadFile = File(...), config: str = Form("{}"),
+                    include_background: bool = Form(True)):
     """
     一条龙接口：跑完检测/OCR/翻译/抹字/嵌字后，一次返回两样东西：
       - image_b64: 译文图（PNG, base64）
@@ -154,7 +155,7 @@ async def page_form(req: Request, image: UploadFile = File(...), config: str = F
     ctx.result.save(buf, format="PNG")
     return PageTranslateResponse(
         image_b64=base64.b64encode(buf.getvalue()).decode(),
-        result=to_translation(ctx),
+        result=to_translation(ctx, include_background=include_background),
     )
 
 
