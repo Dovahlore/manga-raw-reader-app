@@ -608,6 +608,12 @@ def _is_book_deleted(book_id: str) -> bool:
         return book_id in _deleted_book_ids
 
 
+def _unmark_book_deleted(book_id: str) -> None:
+    """书被重新注册（重新导入/同步/上传）时清掉墓碑，否则删过又导回的书永远翻不了。"""
+    with _deleted_lock:
+        _deleted_book_ids.discard(book_id)
+
+
 # ---------------------------------------------------------------- 接口
 
 @app.get("/v1/health", dependencies=[Depends(auth)])
@@ -1114,16 +1120,18 @@ async def upsert_book(body: dict, owner: str = Depends(get_owner)):
         raise HTTPException(403, detail="book belongs to another user")
     await run_in_threadpool(
         db.execute,
-        """INSERT INTO books (id, title, format, page_count, order_dir, owner, hash, fingerprint)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        """INSERT INTO books (id, title, format, mode, page_count, order_dir, owner, hash, fingerprint)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
            ON DUPLICATE KEY UPDATE title=COALESCE(VALUES(title),title),
              format=COALESCE(VALUES(format),format),
+             mode=COALESCE(VALUES(mode),mode),
              page_count=COALESCE(VALUES(page_count),page_count),
              order_dir=COALESCE(VALUES(order_dir),order_dir),
              hash=COALESCE(VALUES(hash),hash),
              fingerprint=COALESCE(VALUES(fingerprint),fingerprint)""",
-        (bid, body.get("title"), body.get("format"), body.get("page_count"), body.get("order_dir"), owner,
+        (bid, body.get("title"), body.get("format"), body.get("mode"), body.get("page_count"), body.get("order_dir"), owner,
          body.get("hash"), body.get("fingerprint")))
+    _unmark_book_deleted(bid)
     return {"ok": True, "book_id": bid}
 
 
@@ -1547,6 +1555,7 @@ async def cloud_upload(req: Request, owner: str = Depends(get_owner),
             "ON DUPLICATE KEY UPDATE mode=VALUES(mode), hash=VALUES(hash), fingerprint=VALUES(fingerprint), "
             "zip_path=VALUES(zip_path), size=VALUES(size), folder_id=VALUES(folder_id), synced_at=NOW()",
             (book_id, owner, title, mode, page_count, hash_, fingerprint, str(zip_path), len(raw), folder_id))
+    _unmark_book_deleted(book_id)
 
     # 先翻译后同步：把本地 UUID 下的旧译文迁到 cloudId
     if old_book_id and old_book_id != book_id:
@@ -1819,18 +1828,7 @@ async def sync(body: dict, owner: str = Depends(get_owner)):
             await run_in_threadpool(_rmtree_safe, Path(row["zip_path"]).parent)
         await run_in_threadpool(_rmtree_safe, S.BOOKS_DIR / _safe(cid))
         _mark_book_deleted(cid)
-    # 4) 夹移动
-    for f in body.get("folder_moves") or []:
-        cid = f.get("cloud_id")
-        name = (f.get("folder") or "").strip()
-        if not cid:
-            continue
-        fid = await run_in_threadpool(_upsert_folder, owner, name) if name else None
-        await run_in_threadpool(
-            db.execute,
-            "UPDATE books SET folder_id=%s WHERE id=%s AND owner=%s AND zip_path IS NOT NULL",
-            (fid, cid, owner))
-    # 5) 批量 upsert 书元数据（本地书按内容 hash 作 id，跨设备同一本）
+    # 4) 批量 upsert 书元数据（本地书按内容 hash 作 id，跨设备同一本；重新注册时清墓碑）
     for b in body.get("books") or []:
         bid = b.get("id")
         if not bid:
@@ -1840,12 +1838,29 @@ async def sync(body: dict, owner: str = Depends(get_owner)):
             continue
         await run_in_threadpool(
             db.execute,
-            """INSERT INTO books (id, title, page_count, order_dir, owner, hash) VALUES (%s,%s,%s,%s,%s,%s)
+            """INSERT INTO books (id, title, mode, page_count, order_dir, owner, hash, fingerprint) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                ON DUPLICATE KEY UPDATE title=COALESCE(VALUES(title),title),
+                 mode=COALESCE(VALUES(mode),mode),
                  page_count=COALESCE(VALUES(page_count),page_count),
                  order_dir=COALESCE(VALUES(order_dir),order_dir),
-                 hash=COALESCE(VALUES(hash),hash)""",
-            (bid, b.get("title"), b.get("page_count"), b.get("order_dir"), owner, b.get("hash")))
+                 hash=COALESCE(VALUES(hash),hash),
+                 fingerprint=COALESCE(VALUES(fingerprint),fingerprint)""",
+            (bid, b.get("title"), b.get("mode"), b.get("page_count"), b.get("order_dir"), owner, b.get("hash"), b.get("fingerprint")))
+        _unmark_book_deleted(bid)
+    # 5) 夹归属（本地书/云端书通用，id=hash；LWW：只接受更新的移动时间；folder 空 = 移出未分类）
+    #    必须在 books upsert 之后，否则新导入的书还没有行，folder 更新会落空
+    for f in body.get("folder_moves") or []:
+        bid = f.get("book_id") or f.get("cloud_id")
+        name = (f.get("folder") or "").strip()
+        changed_at = f.get("changed_at")
+        if not bid or not isinstance(changed_at, int):
+            continue
+        fid = await run_in_threadpool(_upsert_folder, owner, name) if name else None
+        await run_in_threadpool(
+            db.execute,
+            "UPDATE books SET folder_id=%s, folder_changed_at=%s "
+            "WHERE id=%s AND owner=%s AND (folder_changed_at IS NULL OR folder_changed_at < %s)",
+            (fid, changed_at, bid, owner, changed_at))
     # 6) 阅读进度 LWW
     for p in body.get("progress") or []:
         h = p.get("hash")
@@ -1885,12 +1900,18 @@ async def sync(body: dict, owner: str = Depends(get_owner)):
                 "updated_at": r["updated_at"].isoformat() if hasattr(r["updated_at"], "isoformat") else str(r["updated_at"]),
             })
         translation = [{"book_id": k, "pages": v} for k, v in by_book.items()]
+    book_folders = await run_in_threadpool(
+        db.query,
+        "SELECT b.hash, f.name AS folder, b.folder_changed_at FROM books b "
+        "LEFT JOIN cloud_folders f ON b.folder_id=f.id "
+        "WHERE b.owner=%s AND b.folder_id IS NOT NULL AND b.hash IS NOT NULL", (owner,))
     folders = await run_in_threadpool(
         db.query, "SELECT id, name FROM cloud_folders WHERE owner=%s ORDER BY name", (owner,))
     return {
         "progress": remote_progress,
         "cloud_books": cloud_books,
         "translation": translation,
+        "book_folders": book_folders,
         "folders": folders,
     }
 

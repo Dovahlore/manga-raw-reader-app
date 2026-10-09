@@ -247,6 +247,12 @@ def init_schema(retries: int = 30, delay: float = 2.0):
                     cur.execute(
                         "ALTER TABLE reading_progress ADD CONSTRAINT fk_readingprogress_book "
                         "FOREIGN KEY (owner, hash) REFERENCES books (owner, hash) ON DELETE CASCADE")
+                # 12) 夹归属 LWW 时间戳（本地书/云端书通用）
+                cur.execute(
+                    "SELECT COUNT(*) AS c FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='books' AND COLUMN_NAME='folder_changed_at'")
+                if cur.fetchone()["c"] == 0:
+                    cur.execute("ALTER TABLE books ADD COLUMN folder_changed_at BIGINT NULL")
             conn.close()
             return len(stmts)
         except Exception as e:      # noqa: BLE001

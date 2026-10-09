@@ -781,14 +781,12 @@ class LibraryRepository(private val context: Context) {
         val d = readIndexData()
         val newName = name.trim()
         val oldName = d.folders.find { it.id == id }?.name
-        writeIndex(d.books, d.folders.map { if (it.id == id) it.copy(name = newName) else it })
-        // 已同步书：该夹下所有同步书的云端 folder 名跟着改（失败=离线，进待同步队列，下次在线补）
-        for (b in d.books) {
-            if (b.folderId == id && b.cloudId != null) {
-                val ok = runCatching { api.cloudUpdateFolder(b.cloudId, newName) }.getOrDefault(false)
-                if (!ok) recordFolderSync(b.cloudId, newName)
-            }
-        }
+        val now = System.currentTimeMillis()
+        // 夹下每本书的归属名变了 → 时间戳 bump，批量同步会按 hash 推新名
+        writeIndex(
+            d.books.map { if (it.folderId == id) it.copy(folderChangedAt = now) else it },
+            d.folders.map { if (it.id == id) it.copy(name = newName) else it },
+        )
         // 云端收藏夹改名 = 建新名 + 删旧名（书已改挂新名，删旧名不会把书弄丢）
         if (newName.isNotBlank() && oldName != null && oldName.isNotBlank() && oldName != newName) {
             runCatching { api.cloudFolderCreate(newName) }
@@ -800,17 +798,11 @@ class LibraryRepository(private val context: Context) {
     suspend fun deleteFolder(id: String) = withContext(Dispatchers.IO) {
         val d = readIndexData()
         val folderName = d.folders.find { it.id == id }?.name
+        val now = System.currentTimeMillis()
         writeIndex(
-            d.books.map { if (it.folderId == id) it.copy(folderId = null) else it },
+            d.books.map { if (it.folderId == id) it.copy(folderId = null, folderChangedAt = now) else it },
             d.folders.filterNot { it.id == id },
         )
-        // 已同步书：该夹下同步书移出未分类（失败=离线，进待同步队列）
-        for (b in d.books) {
-            if (b.folderId == id && b.cloudId != null) {
-                val ok = runCatching { api.cloudUpdateFolder(b.cloudId, null) }.getOrDefault(false)
-                if (!ok) recordFolderSync(b.cloudId, "")
-            }
-        }
         // 云端同名收藏夹一并删掉（离线则进补删队列，下次在线补），否则 syncFoldersWithCloud 会把它拉回本地
         if (!folderName.isNullOrBlank()) {
             val ok = runCatching { deleteCloudFolderByName(folderName) }.getOrDefault(false)
@@ -818,17 +810,13 @@ class LibraryRepository(private val context: Context) {
         }
     }
 
-    /** 把书移进/移出收藏夹。folderId 传 null 表示移到「未分类」。 */
+    /** 把书移进/移出收藏夹。folderId 传 null 表示移到「未分类」。夹归属变化交给批量同步推。 */
     suspend fun moveBook(bookId: String, folderId: String?) = withContext(Dispatchers.IO) {
         val d = readIndexData()
-        writeIndex(d.books.map { if (it.id == bookId) it.copy(folderId = folderId) else it }, d.folders)
-        // 已同步的书：收藏夹变化同步到云端（失败=离线，进待同步队列）
-        val book = d.books.find { it.id == bookId } ?: return@withContext
-        if (book.cloudId != null) {
-            val name = folderId?.let { fid -> d.folders.find { it.id == fid }?.name }
-            val ok = runCatching { api.cloudUpdateFolder(book.cloudId, name) }.getOrDefault(false)
-            if (!ok) recordFolderSync(book.cloudId, name ?: "")
-        }
+        writeIndex(
+            d.books.map { if (it.id == bookId) it.copy(folderId = folderId, folderChangedAt = System.currentTimeMillis()) else it },
+            d.folders,
+        )
     }
 
     /** 云端书（未下载到本地）改收藏夹：离线/失败进待同步队列，下次在线补。返回本次是否直接成功。 */
@@ -837,6 +825,17 @@ class LibraryRepository(private val context: Context) {
         val ok = runCatching { api.cloudUpdateFolder(cloudId, name.takeIf { it.isNotBlank() }) }.getOrDefault(false)
         if (!ok) recordFolderSync(cloudId, name)
         ok
+    }
+
+    /** 同步拉回的夹归属：按名字 resolve 到本地夹（无则新建），只改本地不推。LWW 由调用方判断。 */
+    suspend fun applyIncomingFolder(bookId: String, folderName: String?, changedAt: Long) = withContext(Dispatchers.IO) {
+        val d = readIndexData()
+        if (d.books.none { it.id == bookId }) return@withContext
+        val (fid, folders) = resolveFolder(d.folders, folderName)
+        writeIndex(
+            d.books.map { if (it.id == bookId) it.copy(folderId = fid, folderChangedAt = changedAt) else it },
+            folders,
+        )
     }
 
     /** 本地与云端脱钩（不动云端数据）：清 cloudId，书变回「仅本地」。
@@ -1527,6 +1526,7 @@ class LibraryRepository(private val context: Context) {
                 coverFile = pages.first(),
                 pageFiles = pages,
                 folderId = if (o.isNull("folder_id")) null else o.optString("folder_id").takeIf { it.isNotBlank() },
+                folderChangedAt = o.optLong("folder_changed_at", 0L),
                 cloudId = if (o.isNull("cloud_id")) null else o.optString("cloud_id").takeIf { it.isNotBlank() },
                 hash = o.optString("hash", ""),
                 fingerprint = o.optString("fingerprint", ""),
@@ -1545,6 +1545,7 @@ class LibraryRepository(private val context: Context) {
                 put("title", b.title)
                 put("mode", if (b.mode == ReadingMode.NORMAL) "normal" else "manga")
                 b.folderId?.let { put("folder_id", it) }
+                if (b.folderChangedAt > 0L) put("folder_changed_at", b.folderChangedAt)
                 b.cloudId?.let { put("cloud_id", it) }
                 if (b.hash.isNotEmpty()) put("hash", b.hash)
                 if (b.fingerprint.isNotEmpty()) put("fingerprint", b.fingerprint)

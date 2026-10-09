@@ -24,6 +24,7 @@ data class Book(
     val coverFile: File,
     val pageFiles: List<File>,   // 按 OPF spine 顺序，pageFiles[0] == 封面
     val folderId: String? = null, // 所属收藏夹；null = 未分类
+    val folderChangedAt: Long = 0L, // 夹归属最后变更时间戳（本地/跨设备 LWW）
     val cloudId: String? = null,  // 已同步到云端的云端书 id（null = 未同步）
     val hash: String = "",        // 源文件 SHA-256（导入去重 + 云端去重）
     val fingerprint: String = "", // 轻量指纹（封面哈希 + 页数）

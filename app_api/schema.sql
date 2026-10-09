@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS books (
   zip_path    VARCHAR(512) NULL,          -- 云同步 zip 路径
   size        BIGINT       NULL,
   folder_id   BIGINT       NULL,          -- 云端收藏夹 id（软引用 cloud_folders.id）
+  folder_changed_at BIGINT  NULL,         -- 夹归属最后变更的客户端毫秒时间戳（本地书/云端书通用 LWW）
   synced_at   DATETIME     NULL,
   created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

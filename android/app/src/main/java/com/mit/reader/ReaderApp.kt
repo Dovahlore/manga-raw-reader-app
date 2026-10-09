@@ -1196,7 +1196,9 @@ class ReaderApp : Application() {
         appScope.launch {
             runCatching {
                 api.upsertBook(book.serverId, book.title, book.pageCount,
-                    if (book.mode == ReadingMode.MANGA) "rtl" else "ltr", book.hash)
+                    if (book.mode == ReadingMode.MANGA) "rtl" else "ltr", book.hash,
+                    mode = if (book.mode == ReadingMode.MANGA) "manga" else "normal",
+                    fingerprint = book.fingerprint)
             }
         }
     }
@@ -1347,6 +1349,8 @@ class ReaderApp : Application() {
     /** 一次性批量同步：推（书元数据/阅读进度/补删/补取消/补删云端）+ 拉（云端书/远端进度/译文状态）。 */
     private suspend fun syncOnce() {
         val books = storageGate.withLock { library.books() }
+        val folders = storageGate.withLock { library.folders() }
+        val folderNameById = folders.associate { it.id to it.name }
 
         val bookArr = JSONArray()
         books.filter { it.cloudId == null && it.hash.isNotEmpty() }.forEach { b ->
@@ -1356,6 +1360,8 @@ class ReaderApp : Application() {
                 put("page_count", b.pageCount)
                 put("order_dir", if (b.mode == ReadingMode.MANGA) "rtl" else "ltr")
                 put("hash", b.hash)
+                put("mode", if (b.mode == ReadingMode.MANGA) "manga" else "normal")
+                if (b.fingerprint.isNotEmpty()) put("fingerprint", b.fingerprint)
             })
         }
         val progressArr = JSONArray()
@@ -1364,9 +1370,19 @@ class ReaderApp : Application() {
                 progressArr.put(JSONObject().apply { put("hash", b.hash); put("page", p.page); put("last_read_at", p.lastReadAt) })
             }
         }
+        // 夹归属（本地书/云端书通用，按 hash 推；folder 空 = 移出未分类；changed_at 做 LWW）
+        val folderArr = JSONArray()
+        books.filter { it.hash.isNotEmpty() && it.folderChangedAt > 0 }.forEach { b ->
+            folderArr.put(JSONObject().apply {
+                put("book_id", b.hash)
+                put("folder", b.folderId?.let { folderNameById[it] } ?: "")
+                put("changed_at", b.folderChangedAt)
+            })
+        }
         val payload = JSONObject().apply {
             put("books", bookArr)
             put("progress", progressArr)
+            put("folder_moves", folderArr)
             put("deletes", JSONArray(pendingDeletes()))
             put("cancels", JSONArray(pendingCancels()))
             put("cloud_deletes", JSONArray(pendingCloudDeletes()))
@@ -1410,6 +1426,20 @@ class ReaderApp : Application() {
                     runCatching { library.attachCloudId(b.id, cid) }
                 b.cloudId != null && b.cloudId !in cloudIds ->
                     runCatching { library.detachCloudByCloudId(b.cloudId!!) }   // 陈旧 UUID cloudId / 云端书已删
+            }
+        }
+
+        // 拉：夹归属（LWW，比本地新的覆盖；folder 空 = 未分类）
+        val bfArr = resp.optJSONArray("book_folders") ?: JSONArray()
+        for (i in 0 until bfArr.length()) {
+            val o = bfArr.getJSONObject(i)
+            val h = o.optString("hash").takeIf { it.isNotBlank() } ?: continue
+            val changedAt = o.optLong("folder_changed_at", 0L)
+            val folderName = o.optString("folder").takeIf { it.isNotBlank() }
+            for (b in books.filter { it.hash == h }) {
+                if (changedAt > b.folderChangedAt) {
+                    runCatching { storageGate.withLock { library.applyIncomingFolder(b.id, folderName, changedAt) } }
+                }
             }
         }
 
