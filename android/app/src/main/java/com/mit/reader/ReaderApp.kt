@@ -1638,7 +1638,15 @@ class ReaderApp : Application() {
         } ?: return
         appScope.launch {
             translateQueue.clear()
-            ids.forEach { id -> if (library.book(id) != null) translateQueue.add(id) }
+            for (id in ids) {
+                val b = library.book(id) ?: continue
+                // 只恢复服务端还在翻的书（有 pending/running 页）；已 settle 的不再重提，
+                // 否则"重启又把已失败/已翻完的书重跑一遍"，进度页会闪一次「进行中」再失败。
+                val stillActive = runCatching {
+                    api.bookPages(b.serverId).any { it.status == "pending" || it.status == "running" }
+                }.getOrDefault(false)
+                if (stillActive) translateQueue.add(id)
+            }
             if (translateQueue.isNotEmpty()) {
                 persistQueue()
                 ensureWorker()
