@@ -253,7 +253,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 modifier = Modifier.padding(top = 24.dp),
             )
             Text(
-                "当前版本：${BuildConfig.VERSION_NAME}（${BuildConfig.VERSION_CODE}）",
+                "当前版本：${BuildConfig.VERSION_NAME}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 8.dp),
