@@ -115,7 +115,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   KEY idx_status (status),
   KEY idx_owner (owner),
   KEY idx_jobs_book (book_id),
-  CONSTRAINT fk_jobs_page FOREIGN KEY (page_id) REFERENCES pages (id) ON DELETE CASCADE
+  CONSTRAINT fk_jobs_page FOREIGN KEY (page_id) REFERENCES pages (id) ON DELETE CASCADE,
+  CONSTRAINT fk_jobs_book FOREIGN KEY (book_id) REFERENCES books (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ============================================================
@@ -164,5 +165,7 @@ CREATE TABLE IF NOT EXISTS reading_progress (
   page         INT NOT NULL,
   last_read_at BIGINT NOT NULL,                -- 客户端毫秒时间戳
   updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (owner, hash)
+  PRIMARY KEY (owner, hash),
+  -- 进度挂在「同 owner+hash 的书」上：书删了进度跟着删（books 有 uniq_owner_hash(owner,hash)）
+  CONSTRAINT fk_readingprogress_book FOREIGN KEY (owner, hash) REFERENCES books (owner, hash) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

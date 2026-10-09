@@ -1393,16 +1393,24 @@ class ReaderApp : Application() {
             }
         }
 
-        // 拉：云端书 → 按 hash 匹配补挂 cloudId
+        // 拉：云端书 → 按 hash 匹配挂/修 cloudId；云端书已被删的（cloudId 不在列表里）脱钩
         val cloudIdByHash = mutableMapOf<String, String>()
+        val cloudIds = mutableSetOf<String>()
         val cbArr = resp.optJSONArray("cloud_books") ?: JSONArray()
         for (i in 0 until cbArr.length()) {
             val o = cbArr.getJSONObject(i)
-            o.optString("hash").takeIf { it.isNotBlank() }?.let { cloudIdByHash[it] = o.getString("id") }
+            val cid = o.getString("id")
+            cloudIds.add(cid)
+            o.optString("hash").takeIf { it.isNotBlank() }?.let { cloudIdByHash[it] = cid }
         }
-        for (b in books.filter { it.hash.isNotEmpty() }) {
-            val cid = cloudIdByHash[b.hash] ?: continue
-            if (b.cloudId != cid) runCatching { library.attachCloudId(b.id, cid) }   // 修正旧的 UUID cloudId → hash
+        for (b in books) {
+            val cid = cloudIdByHash[b.hash]   // hash 命中云端书 → 挂/修 cloudId
+            when {
+                b.hash.isNotEmpty() && cid != null && b.cloudId != cid ->
+                    runCatching { library.attachCloudId(b.id, cid) }
+                b.cloudId != null && b.cloudId !in cloudIds ->
+                    runCatching { library.detachCloudByCloudId(b.cloudId!!) }   // 陈旧 UUID cloudId / 云端书已删
+            }
         }
 
         // 拉：译文状态 → 差异下载

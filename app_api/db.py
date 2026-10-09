@@ -221,6 +221,32 @@ def init_schema(retries: int = 30, delay: float = 2.0):
                     "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='jobs' AND INDEX_NAME='idx_jobs_book'")
                 if cur.fetchone()["c"] == 0:
                     cur.execute("CREATE INDEX idx_jobs_book ON jobs (book_id)")
+                # 11) 外键补全：jobs.book_id、reading_progress → books（先清孤儿，再建 FK；幂等）
+                #     a. 清孤儿 reading_progress（找不到同 owner+hash 的书）
+                cur.execute(
+                    "DELETE rp FROM reading_progress rp "
+                    "LEFT JOIN books b ON b.owner=rp.owner AND b.hash=rp.hash "
+                    "WHERE b.id IS NULL")
+                #     b. 清孤儿 jobs（book_id 指向已删书）
+                cur.execute(
+                    "DELETE j FROM jobs j "
+                    "LEFT JOIN books b ON b.id=j.book_id "
+                    "WHERE j.book_id IS NOT NULL AND b.id IS NULL")
+                #     c. 建 FK（幂等）
+                cur.execute(
+                    "SELECT COUNT(*) AS c FROM information_schema.KEY_COLUMN_USAGE "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='jobs' AND CONSTRAINT_NAME='fk_jobs_book'")
+                if cur.fetchone()["c"] == 0:
+                    cur.execute(
+                        "ALTER TABLE jobs ADD CONSTRAINT fk_jobs_book "
+                        "FOREIGN KEY (book_id) REFERENCES books (id) ON DELETE CASCADE")
+                cur.execute(
+                    "SELECT COUNT(*) AS c FROM information_schema.KEY_COLUMN_USAGE "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='reading_progress' AND CONSTRAINT_NAME='fk_readingprogress_book'")
+                if cur.fetchone()["c"] == 0:
+                    cur.execute(
+                        "ALTER TABLE reading_progress ADD CONSTRAINT fk_readingprogress_book "
+                        "FOREIGN KEY (owner, hash) REFERENCES books (owner, hash) ON DELETE CASCADE")
             conn.close()
             return len(stmts)
         except Exception as e:      # noqa: BLE001
