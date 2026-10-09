@@ -1108,14 +1108,9 @@ class LibraryRepository(private val context: Context) {
             fingerprint = fp,
         )
 
-        // 译文不打进 zip：直接从服务端拉最新结果（云端书永久保留，bookPages 永远查得到）。
-        // 这样别的设备新翻/重翻的页，下载到本机时拿到的就是最新的译文。
-        runCatching { api.bookPages(cloud.id) }.getOrNull()?.forEach { p ->
-            if (p.status == "done" && p.pageIndex in pages.indices) {
-                val f = translatedCacheFile(id, p.pageIndex)
-                f.parentFile?.mkdirs()
-                runCatching { api.download(api.translatedUrl(p.id), f) }
-            }
+        // 译文不打进 zip：用服务端页状态补拉（写 sync_meta 指纹，避免下次同步/打开书重复下载）
+        runCatching { api.bookPages(cloud.id) }.getOrNull()?.let { pagesList ->
+            applyTranslationPages(book, pagesList)
         }
 
         // 缓存封面
