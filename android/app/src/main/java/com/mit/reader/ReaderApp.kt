@@ -1374,11 +1374,31 @@ class ReaderApp : Application() {
         prefs.edit().remove("active_storage_migration").apply()
     }
 
-    /** 每 30 秒 ping 一次服务器，更新在线状态。 */
+    /** 轻量同步：补删/补取消/收藏夹/阅读进度/书元数据（不含译文图补拉）。 */
+    private suspend fun syncLight() {
+        runCatching { drainPendingDeletes() }
+        runCatching { drainPendingCancels() }
+        runCatching { drainPendingCloudDeletes() }
+        runCatching { syncFoldersNow() }
+        runCatching { library.drainFolderSyncs() }
+        runCatching { syncReadingProgressFromServer() }
+        runCatching { syncBookMetadata() }
+    }
+
+    private var lastOnlineSyncAt = 0L
+
+    /** 每 30 秒 ping 一次服务器，更新在线状态；离线→在线时触发一次同步（带 60 秒冷却）。 */
     private fun startConnectivityMonitor() {
         appScope.launch {
+            var wasOnline = serverOnline
             while (true) {
                 serverOnline = api.ping().startsWith("OK")
+                if (!wasOnline && serverOnline && System.currentTimeMillis() - lastOnlineSyncAt > 60_000) {
+                    lastOnlineSyncAt = System.currentTimeMillis()
+                    runCatching { syncLight() }
+                    runCatching { syncAllBooks() }
+                }
+                wasOnline = serverOnline
                 delay(30 * 1000)
             }
         }
@@ -1412,25 +1432,13 @@ class ReaderApp : Application() {
             delay(1500)
             // 打开时：先扫书库文件夹（识别云端书），再同步
             scanLibraryNow()   // 应用级单例扫描；完成时会自行刷新书库
-            runCatching { drainPendingDeletes() }
-            runCatching { drainPendingCancels() }
-            runCatching { drainPendingCloudDeletes() }
-            runCatching { syncFoldersNow() }             // 收藏夹与云端对齐（先补删再并集补建）
-            runCatching { library.drainFolderSyncs() }   // 离线期间移动/重命名/删除收藏夹的云端 folder 补同步
+            runCatching { syncLight() }
             runCatching { syncAllBooks() }   // 云端有新译文就补拉（对所有书，不限于新书）
-            runCatching { syncReadingProgressFromServer() }
-            runCatching { syncBookMetadata() }
-            // 之后每 10 分钟：补删/补取消/补同步收藏夹/阅读进度/书元数据照常；译文补拉降频到每 30 分钟
+            // 之后每 10 分钟轻量同步；译文补拉降频到每 30 分钟
             var tick = 0
             while (true) {
                 delay(10 * 60 * 1000)
-                runCatching { drainPendingDeletes() }
-                runCatching { drainPendingCancels() }
-                runCatching { drainPendingCloudDeletes() }
-                runCatching { syncFoldersNow() }
-                runCatching { library.drainFolderSyncs() }
-                runCatching { syncReadingProgressFromServer() }
-                runCatching { syncBookMetadata() }
+                runCatching { syncLight() }
                 tick++
                 if (tick % 3 == 0) runCatching { syncAllBooks() }   // 每 3 轮 = 30 分钟
             }
