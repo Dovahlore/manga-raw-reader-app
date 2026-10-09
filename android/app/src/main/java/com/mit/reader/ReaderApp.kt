@@ -20,6 +20,7 @@ import com.mit.reader.data.Book
 import com.mit.reader.data.CloudBook
 import com.mit.reader.data.DiscoveredDevice
 import com.mit.reader.data.PeerHasBookException
+import com.mit.reader.data.ServerPage
 import com.mit.reader.data.TransferClient
 import com.mit.reader.data.TransferServer
 import com.mit.reader.data.Folder
@@ -1385,16 +1386,102 @@ class ReaderApp : Application() {
         prefs.edit().remove("active_storage_migration").apply()
     }
 
-    /** 轻量同步：补删/补取消/收藏夹/阅读进度/书元数据/cloudId 匹配（不含译文图补拉）。 */
+    /** 一次性批量同步：推（书元数据/阅读进度/补删/补取消/补删云端）+ 拉（云端书/远端进度/译文状态）。 */
+    private suspend fun syncOnce() {
+        val books = storageGate.withLock { library.books() }
+
+        val bookArr = JSONArray()
+        books.filter { it.cloudId == null && it.hash.isNotEmpty() }.forEach { b ->
+            bookArr.put(JSONObject().apply {
+                put("id", b.serverId)
+                put("title", b.title)
+                put("page_count", b.pageCount)
+                put("order_dir", if (b.mode == ReadingMode.MANGA) "rtl" else "ltr")
+                put("hash", b.hash)
+            })
+        }
+        val progressArr = JSONArray()
+        books.filter { it.hash.isNotEmpty() }.forEach { b ->
+            library.readingProgress(b.id)?.let { p ->
+                progressArr.put(JSONObject().apply { put("hash", b.hash); put("page", p.page); put("last_read_at", p.lastReadAt) })
+            }
+        }
+        val payload = JSONObject().apply {
+            put("books", bookArr)
+            put("progress", progressArr)
+            put("deletes", JSONArray(pendingDeletes()))
+            put("cancels", JSONArray(pendingCancels()))
+            put("cloud_deletes", JSONArray(pendingCloudDeletes()))
+            put("book_ids", JSONArray(books.map { it.serverId }))
+        }
+        val resp = api.sync(payload)
+
+        persistPendingDeletes(emptyList())
+        persistPendingCancels(emptyList())
+        persistPendingCloudDeletes(emptyList())
+
+        // 拉：远端进度（LWW，比本地新的覆盖）
+        val remote = mutableMapOf<String, Pair<Int, Long>>()
+        val rpArr = resp.optJSONArray("progress") ?: JSONArray()
+        for (i in 0 until rpArr.length()) {
+            val o = rpArr.getJSONObject(i)
+            remote[o.getString("hash")] = o.optInt("page") to o.optLong("last_read_at")
+        }
+        for (b in books.filter { it.hash.isNotEmpty() }) {
+            val r = remote[b.hash] ?: continue
+            val local = library.readingProgress(b.id)
+            if (local == null || r.second > local.lastReadAt) {
+                library.setReadingProgressAt(b.id, r.first, r.second)
+            }
+        }
+
+        // 拉：云端书 → 按 hash 匹配补挂 cloudId
+        val cloudIdByHash = mutableMapOf<String, String>()
+        val cbArr = resp.optJSONArray("cloud_books") ?: JSONArray()
+        for (i in 0 until cbArr.length()) {
+            val o = cbArr.getJSONObject(i)
+            o.optString("hash").takeIf { it.isNotBlank() }?.let { cloudIdByHash[it] = o.getString("id") }
+        }
+        for (b in books.filter { it.cloudId == null && it.hash.isNotEmpty() }) {
+            cloudIdByHash[b.hash]?.let { runCatching { library.attachCloudId(b.id, it) } }
+        }
+
+        // 拉：译文状态 → 差异下载
+        val transByBook = mutableMapOf<String, List<ServerPage>>()
+        val tArr = resp.optJSONArray("translation") ?: JSONArray()
+        for (i in 0 until tArr.length()) {
+            val o = tArr.getJSONObject(i)
+            val pagesArr = o.optJSONArray("pages") ?: JSONArray()
+            val pages = (0 until pagesArr.length()).map { j ->
+                val po = pagesArr.getJSONObject(j)
+                ServerPage(
+                    id = po.getInt("id"),
+                    pageIndex = po.getInt("page_index"),
+                    status = po.getString("status"),
+                    configHash = po.optString("config_hash"),
+                    updatedAt = po.optString("updated_at"),
+                )
+            }
+            transByBook[o.getString("book_id")] = pages
+        }
+        syncingTranslations = true
+        try {
+            for (b in books) {
+                if (b.id in translateQueue) continue
+                transByBook[b.serverId]?.let { pages ->
+                    runCatching { storageGate.withLock { library.applyTranslationPages(b, pages) } }
+                }
+            }
+        } finally {
+            syncingTranslations = false
+        }
+    }
+
+    /** 轻量同步：批量同步 + 收藏夹对齐。 */
     private suspend fun syncLight() {
-        runCatching { drainPendingDeletes() }
-        runCatching { drainPendingCancels() }
-        runCatching { drainPendingCloudDeletes() }
+        runCatching { syncOnce() }
         runCatching { syncFoldersNow() }
         runCatching { library.drainFolderSyncs() }
-        runCatching { syncReadingProgressFromServer() }
-        runCatching { syncBookMetadata() }
-        runCatching { syncCloudIdMatch() }
     }
 
     private var lastOnlineSyncAt = 0L
@@ -1408,7 +1495,6 @@ class ReaderApp : Application() {
                 if (!wasOnline && serverOnline && System.currentTimeMillis() - lastOnlineSyncAt > 60_000) {
                     lastOnlineSyncAt = System.currentTimeMillis()
                     runCatching { syncLight() }
-                    runCatching { syncAllBooks() }
                 }
                 wasOnline = serverOnline
                 delay(30 * 1000)
@@ -1445,14 +1531,10 @@ class ReaderApp : Application() {
             // 打开时：先扫书库文件夹（识别云端书），再同步
             scanLibraryNow()   // 应用级单例扫描；完成时会自行刷新书库
             runCatching { syncLight() }
-            runCatching { syncAllBooks() }   // 云端有新译文就补拉（对所有书，不限于新书）
-            // 之后每 10 分钟轻量同步；译文补拉降频到每 30 分钟
-            var tick = 0
+            // 之后每 10 分钟批量同步一次
             while (true) {
                 delay(10 * 60 * 1000)
                 runCatching { syncLight() }
-                tick++
-                if (tick % 3 == 0) runCatching { syncAllBooks() }   // 每 3 轮 = 30 分钟
             }
         }
     }

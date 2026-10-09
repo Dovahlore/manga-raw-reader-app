@@ -351,6 +351,18 @@ class TranslationApi {
             client.newCall(req).execute().use { it.isSuccessful }
         }
 
+    /** 一次性批量同步（推书元数据/进度/补删 + 拉云端书/远端进度/译文状态/收藏夹）。 */
+    suspend fun sync(payload: org.json.JSONObject): org.json.JSONObject =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val body = payload.toString().toRequestBody("application/json".toMediaType())
+            val req = Request.Builder().url("$base/v1/sync").authed().post(body).build()
+            client.newCall(req).execute().use { resp ->
+                val text = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
+                JSONObject(text)
+            }
+        }
+
     /** 测连通：GET /v1/health，返回状态说明。 */
     suspend fun ping(): String = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         runCatching {

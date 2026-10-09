@@ -1783,6 +1783,108 @@ async def reading_progress_put(book_hash: str, body: dict, owner: str = Depends(
     return {"ok": True, "hash": book_hash}
 
 
+@app.post("/v1/sync", dependencies=[Depends(auth)])
+async def sync(body: dict, owner: str = Depends(get_owner)):
+    """一次性双向同步（专用批量接口，替代几十个 N+1 请求）：
+    推：批量 upsert 书元数据、LWW 阅读进度、应用补删/补取消/补删云端/夹移动；
+    拉：返回云端书、远端进度、译文状态、收藏夹。"""
+    # 1) 补删本地书（级联删翻译结果 + 磁盘）
+    for bid in body.get("deletes") or []:
+        if not bid:
+            continue
+        await run_in_threadpool(db.execute, "DELETE FROM books WHERE id=%s AND owner=%s", (bid, owner))
+        await run_in_threadpool(_rmtree_safe, S.BOOKS_DIR / _safe(bid))
+        _mark_book_deleted(bid)
+    # 2) 补取消翻译
+    for bid in body.get("cancels") or []:
+        if not bid:
+            continue
+        await run_in_threadpool(
+            db.execute,
+            "UPDATE jobs SET status='cancelled', finished_at=NOW() "
+            "WHERE book_id=%s AND status IN ('queued','running')", (bid,))
+    # 3) 补删云端书
+    for cid in body.get("cloud_deletes") or []:
+        if not cid:
+            continue
+        await run_in_threadpool(db.execute, "DELETE FROM books WHERE id=%s AND owner=%s", (cid, owner))
+        await run_in_threadpool(_rmtree_safe, S.BOOKS_DIR / _safe(cid))
+        _mark_book_deleted(cid)
+    # 4) 夹移动
+    for f in body.get("folder_moves") or []:
+        cid = f.get("cloud_id")
+        name = (f.get("folder") or "").strip()
+        if not cid:
+            continue
+        fid = await run_in_threadpool(_upsert_folder, owner, name) if name else None
+        await run_in_threadpool(
+            db.execute,
+            "UPDATE books SET folder_id=%s WHERE id=%s AND owner=%s AND zip_path IS NOT NULL",
+            (fid, cid, owner))
+    # 5) 批量 upsert 书元数据（本地书按内容 hash 作 id，跨设备同一本）
+    for b in body.get("books") or []:
+        bid = b.get("id")
+        if not bid:
+            continue
+        row = await run_in_threadpool(db.query_one, "SELECT owner FROM books WHERE id=%s", (bid,))
+        if row and str(row["owner"]) != str(owner):
+            continue
+        await run_in_threadpool(
+            db.execute,
+            """INSERT INTO books (id, title, page_count, order_dir, owner, hash) VALUES (%s,%s,%s,%s,%s,%s)
+               ON DUPLICATE KEY UPDATE title=COALESCE(VALUES(title),title),
+                 page_count=COALESCE(VALUES(page_count),page_count),
+                 order_dir=COALESCE(VALUES(order_dir),order_dir),
+                 hash=COALESCE(VALUES(hash),hash)""",
+            (bid, b.get("title"), b.get("page_count"), b.get("order_dir"), owner, b.get("hash")))
+    # 6) 阅读进度 LWW
+    for p in body.get("progress") or []:
+        h = p.get("hash")
+        page = p.get("page")
+        last = p.get("last_read_at")
+        if not h or not isinstance(page, int) or not isinstance(last, int):
+            continue
+        await run_in_threadpool(
+            db.execute,
+            "INSERT INTO reading_progress (owner, hash, page, last_read_at) VALUES (%s,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE "
+            "page=IF(VALUES(last_read_at) > last_read_at, VALUES(page), page), "
+            "last_read_at=IF(VALUES(last_read_at) > last_read_at, VALUES(last_read_at), last_read_at)",
+            (owner, h, page, last))
+    # 7) 拉取远端状态
+    remote_progress = await run_in_threadpool(
+        db.query, "SELECT hash, page, last_read_at FROM reading_progress WHERE owner=%s", (owner,))
+    cloud_books = await run_in_threadpool(
+        db.query,
+        "SELECT b.id, b.title, b.mode, b.page_count, b.hash, b.fingerprint, b.size, f.name AS folder "
+        "FROM books b LEFT JOIN cloud_folders f ON b.folder_id=f.id "
+        "WHERE b.owner=%s AND b.zip_path IS NOT NULL", (owner,))
+    translation = []
+    book_ids = [x for x in (body.get("book_ids") or []) if x]
+    if book_ids:
+        ph = ",".join(["%s"] * len(book_ids))
+        rows = await run_in_threadpool(
+            db.query,
+            f"SELECT book_id, id, page_index, status, config_hash, updated_at "
+            f"FROM pages WHERE book_id IN ({ph}) ORDER BY page_index",
+            tuple(book_ids))
+        by_book: Dict[str, List[dict]] = {}
+        for r in rows:
+            by_book.setdefault(r["book_id"], []).append({
+                "id": r["id"], "page_index": r["page_index"], "status": r["status"],
+                "config_hash": r["config_hash"], "updated_at": str(r["updated_at"]),
+            })
+        translation = [{"book_id": k, "pages": v} for k, v in by_book.items()]
+    folders = await run_in_threadpool(
+        db.query, "SELECT id, name FROM cloud_folders WHERE owner=%s ORDER BY name", (owner,))
+    return {
+        "progress": remote_progress,
+        "cloud_books": cloud_books,
+        "translation": translation,
+        "folders": folders,
+    }
+
+
 @app.get("/", include_in_schema=False)
 async def root():
     return {"service": "mit-app-api", "docs": "/docs", "health": "/v1/health"}

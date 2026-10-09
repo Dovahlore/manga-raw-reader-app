@@ -1130,8 +1130,18 @@ class LibraryRepository(private val context: Context) {
      *  priority=优先下载的页（阅读器传当前页）：按距离排序，让「正在看的那几页」先就绪，翻页更顺。
      *  返回本次已就绪的页索引。 */
     suspend fun refreshTranslations(book: Book, overwrite: Boolean, priority: Int? = null): Set<Int> = withContext(Dispatchers.IO) {
+        val pages = runCatching { api.bookPages(book.serverId) }.getOrNull() ?: return@withContext emptySet()
+        applyTranslationPages(book, pages, overwrite, priority)
+    }
+
+    /** 用已拿到的服务端页状态（批量同步接口返回）补拉差异译文页。 */
+    suspend fun applyTranslationPages(
+        book: Book,
+        pages: List<ServerPage>,
+        overwrite: Boolean = false,
+        priority: Int? = null,
+    ): Set<Int> = withContext(Dispatchers.IO) {
         val done = mutableSetOf<Int>()
-        val pages = runCatching { api.bookPages(book.serverId) }.getOrNull() ?: return@withContext done
         // 阅读器打开时：先拉当前页附近的页（当前页 → ±1 → ±2 → …），再补其余
         val ordered = if (priority != null) pages.sortedBy { kotlin.math.abs(it.pageIndex - priority) } else pages
         val metaFile = syncMetaFile(book.id)
