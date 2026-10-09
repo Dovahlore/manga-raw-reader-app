@@ -126,18 +126,16 @@ class TransferServer(
             pageIndexByPath[relPath] = o.optInt("pageIndex", -1)
         }
 
-        // 增量：同内容书已有 → 原页跳过；已有译文页跳过
+        // 对端已有同内容书 → 直接拦截，不建会话（避免孤儿 staging 目录）
         val existing = if (hash.isNotEmpty()) existingBookByHash(hash) else null
-        val need = mutableListOf<String>()
-        for ((relPath, entry) in files) {
-            val already = when {
-                relPath.startsWith("pages/") -> existing != null
-                relPath.startsWith("translated/") ->
-                    existing != null && hasTranslatedPage(existing.id, pageIndexByPath[relPath] ?: -1)
-                else -> false
-            }
-            if (!already) need += relPath
+        if (existing != null) {
+            return jsonResponse(JSONObject().apply {
+                put("existed", true)
+                put("title", title)
+            })
         }
+
+        val need = files.keys.toList()
         val requiredBytes = need.sumOf { files[it]?.size ?: 0L }
         // 预留 64MB 余量，避免解压/建索引时把空间撑满
         val usable = stagingRoot.parentFile?.usableSpace ?: 0L
@@ -155,7 +153,6 @@ class TransferServer(
             put("spaceOk", spaceOk)
             put("requiredBytes", requiredBytes)
             put("title", title)
-            put("existed", existing != null)
         })
     }
 

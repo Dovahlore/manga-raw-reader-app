@@ -1749,30 +1749,31 @@ async def app_release_upload(
 
 
 # ---------------------------------------------------------------- 阅读进度同步
-# 云端书按 owner+book_id(cloudId) 存进度，跨设备同步；LWW 用客户端毫秒时间戳。
+# 按 owner+hash(内容哈希) 存进度：本地书/云端书通用，跨设备同步同一本书。
+# LWW 用客户端毫秒时间戳。
 
 @app.get("/v1/reading-progress", dependencies=[Depends(auth)])
 async def reading_progress_list(owner: str = Depends(get_owner)):
     rows = await run_in_threadpool(
         db.query,
-        "SELECT book_id, page, last_read_at FROM reading_progress WHERE owner=%s", (owner,))
+        "SELECT hash, page, last_read_at FROM reading_progress WHERE owner=%s", (owner,))
     return {"progress": rows}
 
 
-@app.put("/v1/reading-progress/{book_id}", dependencies=[Depends(auth)])
-async def reading_progress_put(book_id: str, body: dict, owner: str = Depends(get_owner)):
+@app.put("/v1/reading-progress/{book_hash}", dependencies=[Depends(auth)])
+async def reading_progress_put(book_hash: str, body: dict, owner: str = Depends(get_owner)):
     page = body.get("page")
     last_read_at = body.get("last_read_at")
     if not isinstance(page, int) or not isinstance(last_read_at, int):
         raise HTTPException(400, detail="page/last_read_at 必须是整数")
     await run_in_threadpool(
         db.execute,
-        "INSERT INTO reading_progress (owner, book_id, page, last_read_at) VALUES (%s,%s,%s,%s) "
+        "INSERT INTO reading_progress (owner, hash, page, last_read_at) VALUES (%s,%s,%s,%s) "
         "ON DUPLICATE KEY UPDATE "
         "page=IF(VALUES(last_read_at) > last_read_at, VALUES(page), page), "
         "last_read_at=IF(VALUES(last_read_at) > last_read_at, VALUES(last_read_at), last_read_at)",
-        (owner, book_id, page, last_read_at))
-    return {"ok": True, "book_id": book_id}
+        (owner, book_hash, page, last_read_at))
+    return {"ok": True, "hash": book_hash}
 
 
 @app.get("/", include_in_schema=False)

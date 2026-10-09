@@ -58,7 +58,7 @@ data class AppUpdate(
     val downloadPath: String = "",
 )
 data class ReadingProgressResp(
-    val bookId: String,
+    val hash: String,
     val page: Int?,
     val lastReadAt: Long?,
 )
@@ -318,7 +318,7 @@ class TranslationApi {
                 (0 until arr.length()).map { i ->
                     val o = arr.getJSONObject(i)
                     ReadingProgressResp(
-                        bookId = o.getString("book_id"),
+                        hash = o.getString("hash"),
                         page = if (o.isNull("page")) null else o.optInt("page"),
                         lastReadAt = if (o.isNull("last_read_at")) null else o.optLong("last_read_at"),
                     )
@@ -326,14 +326,14 @@ class TranslationApi {
             }
         }
 
-    /** 上传某本云端书的阅读进度（LWW）。 */
-    suspend fun putReadingProgress(bookId: String, page: Int, lastReadAt: Long): Boolean =
+    /** 上传某本书（按内容 hash）的阅读进度（LWW）。本地书/云端书通用。 */
+    suspend fun putReadingProgress(hash: String, page: Int, lastReadAt: Long): Boolean =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             val body = JSONObject().apply {
                 put("page", page)
                 put("last_read_at", lastReadAt)
             }.toString().toRequestBody("application/json".toMediaType())
-            val req = Request.Builder().url("$base/v1/reading-progress/$bookId").authed().put(body).build()
+            val req = Request.Builder().url("$base/v1/reading-progress/$hash").authed().put(body).build()
             client.newCall(req).execute().use { it.isSuccessful }
         }
 

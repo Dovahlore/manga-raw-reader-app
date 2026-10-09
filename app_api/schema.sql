@@ -155,14 +155,14 @@ CREATE TABLE IF NOT EXISTS app_releases (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ============================================================
--- 阅读进度（云端书按 owner+book_id 存，跨设备同步）
+-- 阅读进度（按 owner+hash 存：hash 是内容哈希，本地书/云端书通用，跨设备同步）
 -- last_read_at 用客户端毫秒时间戳做 LWW（最后写入者胜）。
 -- ============================================================
 CREATE TABLE IF NOT EXISTS reading_progress (
   owner        VARCHAR(191) NOT NULL DEFAULT 'default',
-  book_id      VARCHAR(191) NOT NULL,          -- 云端书的 cloudId
+  hash         VARCHAR(64) NOT NULL,           -- 书的内容 hash（跨设备同一本书）
   page         INT NOT NULL,
   last_read_at BIGINT NOT NULL,                -- 客户端毫秒时间戳
   updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (owner, book_id)
+  PRIMARY KEY (owner, hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -20,7 +20,7 @@ android {
         applicationId = "com.mit.reader"
         minSdk = 26
         targetSdk = 34
-        versionCode = 11
+        versionCode = 13
         versionName = "1.4"
     }
 

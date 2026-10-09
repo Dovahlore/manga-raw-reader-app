@@ -1168,30 +1168,36 @@ class ReaderApp : Application() {
 
     private val progressPushJobs = mutableMapOf<String, Job>()
 
-    /** 翻页时记录进度：本地立刻存；云端书防抖 2 秒推后端。 */
+    /** 翻页时记录进度：本地立刻存；按内容 hash 防抖 2 秒推后端（本地书/云端书通用）。 */
     fun recordReadingProgress(book: Book, page: Int) {
         val now = System.currentTimeMillis()
         library.setReadingProgressAt(book.id, page, now)
-        val cloudId = book.cloudId ?: return
+        val h = book.hash
+        if (h.isEmpty()) return
         progressPushJobs[book.id]?.cancel()
         progressPushJobs[book.id] = appScope.launch {
             delay(2000)
-            runCatching { api.putReadingProgress(cloudId, page, now) }
+            runCatching { api.putReadingProgress(h, page, now) }
         }
     }
 
-    /** 从后端拉所有云端书的进度，比本地新的就覆盖（LWW）。 */
+    /** 双向同步所有书（按 hash）的进度：远端更新的拉下来，本地更新的推上去（离线读过的也能补推）。 */
     private suspend fun syncReadingProgressFromServer() {
         val list = runCatching { api.getReadingProgressList() }.getOrNull() ?: return
-        if (list.isEmpty()) return
-        val books = library.books().associateBy { it.cloudId }.filterKeys { it != null }
+        val remote = mutableMapOf<String, Pair<Int, Long>>()
         for (rp in list) {
             val page = rp.page ?: continue
             val at = rp.lastReadAt ?: continue
-            val b = books[rp.bookId] ?: continue
+            remote[rp.hash] = page to at
+        }
+        for (b in library.books().filter { it.hash.isNotEmpty() }) {
             val local = library.readingProgress(b.id)
-            if (local == null || at > local.lastReadAt) {
-                library.setReadingProgressAt(b.id, page, at)
+            val r = remote[b.hash]
+            when {
+                r != null && (local == null || r.second > local.lastReadAt) ->
+                    library.setReadingProgressAt(b.id, r.first, r.second)          // 拉远端更新的
+                local != null && (r == null || local.lastReadAt > r.second) ->
+                    runCatching { api.putReadingProgress(b.hash, local.page, local.lastReadAt) }  // 推本地更新的
             }
         }
     }
