@@ -1374,19 +1374,19 @@ class ReaderApp : Application() {
             // 启动清理：删冗余 book.src + 失败同步/下载遗留的 zip + 已删书的孤儿目录（幂等）
             runCatching { storageGate.withLock { library.cleanupOrphans() } }
             delay(1500)
-            // 打开时：先扫书库文件夹（识别云端书），再同步（把识别成云端书后缺的远程译文拉下来）
-            scanLibraryNow()   // 应用级单例扫描；完成时会自行刷新书库
+            // 打开时：先扫书库文件夹（识别云端书），扫到新书才补拉译文（没新书不白跑）
+            val scannedAdded = scanLibraryNow()   // 应用级单例扫描；完成时会自行刷新书库
             runCatching { drainPendingDeletes() }
             runCatching { drainPendingCancels() }
             runCatching { drainPendingCloudDeletes() }
             runCatching { syncFoldersNow() }             // 收藏夹与云端对齐（先补删再并集补建）
             runCatching { library.drainFolderSyncs() }   // 离线期间移动/重命名/删除收藏夹的云端 folder 补同步
-            runCatching { syncAllBooks() }
+            if (scannedAdded > 0) runCatching { syncAllBooks() }   // 有扫到新书才补拉译文
             runCatching { syncReadingProgressFromServer() }
-            // 之后每 5 分钟：补删/补取消/补同步收藏夹照常；译文补拉降频到每 15 分钟，减少 bookPages 请求
+            // 之后每 10 分钟：补删/补取消/补同步收藏夹/阅读进度照常；译文补拉降频到每 30 分钟，减少 bookPages 请求
             var tick = 0
             while (true) {
-                delay(5 * 60 * 1000)
+                delay(10 * 60 * 1000)
                 runCatching { drainPendingDeletes() }
                 runCatching { drainPendingCancels() }
                 runCatching { drainPendingCloudDeletes() }
@@ -1394,7 +1394,7 @@ class ReaderApp : Application() {
                 runCatching { library.drainFolderSyncs() }
                 runCatching { syncReadingProgressFromServer() }
                 tick++
-                if (tick % 3 == 0) runCatching { syncAllBooks() }   // 每 3 轮 = 15 分钟
+                if (tick % 3 == 0) runCatching { syncAllBooks() }   // 每 3 轮 = 30 分钟
             }
         }
     }
