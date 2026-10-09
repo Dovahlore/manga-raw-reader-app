@@ -1105,18 +1105,25 @@ async def retranslate(page_id: int, body: Optional[dict] = None, owner: str = De
 
 @app.post("/v1/books", dependencies=[Depends(auth)])
 async def upsert_book(body: dict, owner: str = Depends(get_owner)):
+    """新建/更新书元数据（App 导入书时上报；本地书按内容 hash 做跨设备同一 id）。"""
     bid = body.get("id") or body.get("book_id")
     if not bid:
         raise HTTPException(400, detail="缺少 id")
-    await _ensure_book_owner(bid, owner)
+    row = await run_in_threadpool(db.query_one, "SELECT owner FROM books WHERE id=%s", (bid,))
+    if row and str(row["owner"]) != str(owner):
+        raise HTTPException(403, detail="book belongs to another user")
     await run_in_threadpool(
         db.execute,
-        """INSERT INTO books (id, title, format, page_count, order_dir, owner) VALUES (%s,%s,%s,%s,%s,%s)
+        """INSERT INTO books (id, title, format, page_count, order_dir, owner, hash, fingerprint)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
            ON DUPLICATE KEY UPDATE title=COALESCE(VALUES(title),title),
              format=COALESCE(VALUES(format),format),
              page_count=COALESCE(VALUES(page_count),page_count),
-             order_dir=COALESCE(VALUES(order_dir),order_dir)""",
-        (bid, body.get("title"), body.get("format"), body.get("page_count"), body.get("order_dir"), owner))
+             order_dir=COALESCE(VALUES(order_dir),order_dir),
+             hash=COALESCE(VALUES(hash),hash),
+             fingerprint=COALESCE(VALUES(fingerprint),fingerprint)""",
+        (bid, body.get("title"), body.get("format"), body.get("page_count"), body.get("order_dir"), owner,
+         body.get("hash"), body.get("fingerprint")))
     return {"ok": True, "book_id": bid}
 
 

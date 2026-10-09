@@ -209,6 +209,7 @@ class ReaderApp : Application() {
         } else {
             libraryBooks + book
         }
+        registerBookMetadata(book)   // 新书入库即上报后端（幂等）
     }
 
     fun refreshLibraryCache(debounceMillis: Long = 0) {
@@ -445,6 +446,7 @@ class ReaderApp : Application() {
     }
 
     fun cancelSyncBook(book: Book) = runBackgroundAction("cancel-sync:${book.id}") {
+        if (!requireOnline()) return@runBackgroundAction
         stopTranslatingIf(book.id)
         val cloudId = book.cloudId
         val cancelled = runCatching { library.cancelSync(book) }.isSuccess
@@ -556,8 +558,8 @@ class ReaderApp : Application() {
         runCatching { library.deleteSourceFile(book.hash) }
         library.delete(book.id)
         if (book.cloudId == null) {
-            val ok = runCatching { api.deleteBook(book.id) }.getOrDefault(false)
-            if (!ok) recordPendingDelete(book.id)
+            val ok = runCatching { api.deleteBook(book.serverId) }.getOrDefault(false)
+            if (!ok) recordPendingDelete(book.serverId)
         }
         Toast.makeText(this, "已删除《${book.title}》", Toast.LENGTH_SHORT).show()
         bumpLibrary()
@@ -677,6 +679,10 @@ class ReaderApp : Application() {
 
     /** 单页翻译跑在应用级作用域；退出阅读器后结果仍写入本地缓存。 */
     fun translateBookPage(book: Book, index: Int, force: Boolean) = runBackgroundAction("translate-page:${book.id}:$index") {
+        if (!requireOnline()) {
+            _pageTranslationFailed.tryEmit(Triple(book.id, index, "未连接"))
+            return@runBackgroundAction
+        }
         try {
             val image = book.pageFiles[index]
             val jobId = if (book.cloudId != null) {
@@ -733,6 +739,7 @@ class ReaderApp : Application() {
 
     /** 同步一本书到云端：打包 → 上传 → 记录 cloudId。后台进行，不随页面销毁而中断。 */
     fun syncBook(book: Book) {
+        if (!requireOnline()) return
         if (syncTasks.containsKey(book.id)) return   // 同一本正在同步，忽略重复点击
         appScope.launch {
             stopTranslatingIf(book.id)   // 同步会迁移 book_id，正在翻就先停，避免轮询到旧 id
@@ -758,6 +765,7 @@ class ReaderApp : Application() {
 
     /** 从云端下载一本书还原到本地（后台进行，不随页面销毁而中断）。 */
     fun downloadCloudBook(cb: CloudBook) {
+        if (!requireOnline()) return
         if (syncTasks.containsKey(cb.id)) return
         appScope.launch {
             setSync(cb.id, "下载中…", null)
@@ -1202,6 +1210,34 @@ class ReaderApp : Application() {
         }
     }
 
+    /** 导入后立刻上报书元数据（本地书也注册；离线静默失败，后续 syncBookMetadata 补）。 */
+    fun registerBookMetadata(book: Book) {
+        if (book.cloudId != null) return   // 云端书走 cloud/books，不重复注册
+        appScope.launch {
+            runCatching {
+                api.upsertBook(book.serverId, book.title, book.pageCount,
+                    if (book.mode == ReadingMode.MANGA) "rtl" else "ltr", book.hash)
+            }
+        }
+    }
+
+    /** 补上报本地书元数据（幂等；离线导入的书联网后补进后端 DB）。 */
+    private suspend fun syncBookMetadata() {
+        for (b in library.books().filter { it.cloudId == null && it.hash.isNotEmpty() }) {
+            runCatching {
+                api.upsertBook(b.serverId, b.title, b.pageCount,
+                    if (b.mode == ReadingMode.MANGA) "rtl" else "ltr", b.hash)
+            }
+        }
+    }
+
+    /** 需要联网的操作先检查；离线时提示并拦截。 */
+    private fun requireOnline(): Boolean {
+        if (serverOnline) return true
+        Toast.makeText(this, "当前离线，无法执行此操作", Toast.LENGTH_SHORT).show()
+        return false
+    }
+
     override fun onCreate() {
         super.onCreate()
         ServerConfig.init(this)
@@ -1374,16 +1410,17 @@ class ReaderApp : Application() {
             // 启动清理：删冗余 book.src + 失败同步/下载遗留的 zip + 已删书的孤儿目录（幂等）
             runCatching { storageGate.withLock { library.cleanupOrphans() } }
             delay(1500)
-            // 打开时：先扫书库文件夹（识别云端书），扫到新书才补拉译文（没新书不白跑）
-            val scannedAdded = scanLibraryNow()   // 应用级单例扫描；完成时会自行刷新书库
+            // 打开时：先扫书库文件夹（识别云端书），再同步
+            scanLibraryNow()   // 应用级单例扫描；完成时会自行刷新书库
             runCatching { drainPendingDeletes() }
             runCatching { drainPendingCancels() }
             runCatching { drainPendingCloudDeletes() }
             runCatching { syncFoldersNow() }             // 收藏夹与云端对齐（先补删再并集补建）
             runCatching { library.drainFolderSyncs() }   // 离线期间移动/重命名/删除收藏夹的云端 folder 补同步
-            if (scannedAdded > 0) runCatching { syncAllBooks() }   // 有扫到新书才补拉译文
+            runCatching { syncAllBooks() }   // 云端有新译文就补拉（对所有书，不限于新书）
             runCatching { syncReadingProgressFromServer() }
-            // 之后每 10 分钟：补删/补取消/补同步收藏夹/阅读进度照常；译文补拉降频到每 30 分钟，减少 bookPages 请求
+            runCatching { syncBookMetadata() }
+            // 之后每 10 分钟：补删/补取消/补同步收藏夹/阅读进度/书元数据照常；译文补拉降频到每 30 分钟
             var tick = 0
             while (true) {
                 delay(10 * 60 * 1000)
@@ -1393,6 +1430,7 @@ class ReaderApp : Application() {
                 runCatching { syncFoldersNow() }
                 runCatching { library.drainFolderSyncs() }
                 runCatching { syncReadingProgressFromServer() }
+                runCatching { syncBookMetadata() }
                 tick++
                 if (tick % 3 == 0) runCatching { syncAllBooks() }   // 每 3 轮 = 30 分钟
             }
@@ -1541,6 +1579,7 @@ class ReaderApp : Application() {
 
     /** 一键全书翻译（后台排队执行）。已在队列/正在翻则忽略；多本书按点击顺序一本本翻。 */
     fun startTranslateAll(book: Book) {
+        if (!requireOnline()) return
         if (book.id in translateQueue) return
         translateQueue.add(book.id)
         persistQueue()

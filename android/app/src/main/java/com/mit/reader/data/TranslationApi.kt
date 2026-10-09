@@ -326,6 +326,20 @@ class TranslationApi {
             }
         }
 
+    /** 上报/更新书元数据（本地书也注册，便于管理平台展示 + 跨设备翻译去重）。 */
+    suspend fun upsertBook(bookId: String, title: String, pageCount: Int, orderDir: String, hash: String): Boolean =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val body = JSONObject().apply {
+                put("id", bookId)
+                put("title", title)
+                put("page_count", pageCount)
+                put("order_dir", orderDir)
+                if (hash.isNotEmpty()) put("hash", hash)
+            }.toString().toRequestBody("application/json".toMediaType())
+            val req = Request.Builder().url("$base/v1/books").authed().post(body).build()
+            client.newCall(req).execute().use { it.isSuccessful }
+        }
+
     /** 上传某本书（按内容 hash）的阅读进度（LWW）。本地书/云端书通用。 */
     suspend fun putReadingProgress(hash: String, page: Int, lastReadAt: Long): Boolean =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {

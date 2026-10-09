@@ -31,7 +31,7 @@ data class Book(
 )
 
 /**
- * 服务端 book_id：已同步的书用「云端书 id」，这样它的翻译结果随云永久保留、取消同步时级联删除；
- * 未同步的书用本地 id（14 天清理策略照旧）。
+ * 服务端 book_id：已同步的书用「云端书 id」；未同步的书用内容 hash（跨设备同一本书共用，翻译结果互通）。
+ * hash 为空时退回本地 id。
  */
-val Book.serverId: String get() = cloudId ?: id
+val Book.serverId: String get() = cloudId ?: hash.ifBlank { id }
