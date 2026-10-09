@@ -246,6 +246,10 @@ private fun GlobalTaskBanner(app: ReaderApp) {
     }
 }
 
+/** 本地书与云端书按「内容 hash」互认（cloudId 现在也等于 hash，但以 hash 为准，避免陈旧 cloudId 对不上）。 */
+private fun Book.matchesCloud(cb: CloudBook): Boolean =
+    cloudId == cb.id || (hash.isNotEmpty() && cb.hash != null && hash == cb.hash)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LibraryScreen(onOpen: (String) -> Unit, onSettings: () -> Unit, onKmoe: () -> Unit) {
@@ -421,16 +425,15 @@ fun LibraryScreen(onOpen: (String) -> Unit, onSettings: () -> Unit, onKmoe: () -
                                 val folder = folders.find { it.id == currentFolderId }
                                 if (folder != null) {
                                     val localInFolder = books.filter { it.folderId == currentFolderId }
-                                    // 云端书只算「仅云端」的，避免同步+本地同一本被数两次
+                                    // 云端书只算「仅云端」的，避免同步+本地同一本被数两次（按 hash 互认）
                                     val cloudOnlyInFolder = cloudBooks.filter { cb ->
-                                        books.none { it.cloudId == cb.id } && cb.folder == folder.name
+                                        books.none { it.matchesCloud(cb) } && cb.folder == folder.name
                                     }
-                                    val knownCloudIds = cloudBooks.map { it.id }.toSet()
                                     val n = when (libraryFilter) {
                                         LibraryFilter.ALL -> localInFolder.size + cloudOnlyInFolder.size
                                         LibraryFilter.LOCAL -> localInFolder.size
                                         LibraryFilter.CLOUD ->
-                                            localInFolder.count { it.cloudId != null && it.cloudId in knownCloudIds } +
+                                            localInFolder.count { b -> cloudBooks.any { b.matchesCloud(it) } } +
                                                 cloudOnlyInFolder.size
                                     }
                                     "${folder.name}（$n）"
@@ -652,11 +655,11 @@ fun LibraryScreen(onOpen: (String) -> Unit, onSettings: () -> Unit, onKmoe: () -
                         onStopCloud = { doStopCloud(it) },
                     )
                 } else {
-                    val cloudIds = cloudBooks.map { it.id }.toSet()
+                    // 本地书与云端书按「内容 hash」互认（cloudId 现在也等于 hash，但以 hash 为准，避免陈旧 cloudId 对不上）
                     val localEntries = sortedBooks(books).map { b ->
-                        LibraryEntry.Local(b, b.cloudId != null && b.cloudId in cloudIds)
+                        LibraryEntry.Local(b, cloudBooks.any { b.matchesCloud(it) })
                     }
-                    val cloudOnly = cloudBooks.filter { cb -> books.none { it.cloudId == cb.id } }
+                    val cloudOnly = cloudBooks.filter { cb -> books.none { it.matchesCloud(cb) } }
                         .map { LibraryEntry.Cloud(it) }
                     val shownEntries = when (libraryFilter) {
                         LibraryFilter.ALL -> localEntries + cloudOnly
@@ -2093,7 +2096,7 @@ private fun ProgressList(
     }
     // 云端书（未下载到本地）里有翻译进度/在跑的
     val visibleCloud = cloudBooks.filter { cb ->
-        books.none { it.cloudId == cb.id } &&
+        books.none { it.matchesCloud(cb) } &&
             serverMap[cb.id]?.let { it.donePages + it.failedPages > 0 || it.activeJobs > 0 } == true
     }
     if (downloadTasks.isEmpty() && visibleBooks.isEmpty() && visibleCloud.isEmpty()) {
@@ -2513,7 +2516,7 @@ private fun SearchResults(
         return
     }
     val folderById = folders.associateBy { it.id }
-    val cloudOnly = cloudBooks.filter { cloud -> books.none { it.cloudId == cloud.id } }
+    val cloudOnly = cloudBooks.filter { cloud -> books.none { it.matchesCloud(cloud) } }
     val matchedFolders = folders.filter { it.name.contains(q, ignoreCase = true) }
     val matchedBooks = books.filter { it.title.contains(q, ignoreCase = true) }
     val matchedCloudBooks = cloudOnly.filter { it.title?.contains(q, ignoreCase = true) == true }
