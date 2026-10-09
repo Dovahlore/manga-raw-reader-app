@@ -1195,6 +1195,14 @@ async def translate_all(
     if len(indices) != len(raws):
         raise HTTPException(400, detail="page_indices 与 images 数量不一致")
 
+    # 重翻这些页：把旧 failed 清回 pending，避免书库进度页继续显示上一轮的失败数
+    if indices:
+        ph = ",".join(["%s"] * len(indices))
+        await run_in_threadpool(
+            db.execute,
+            f"UPDATE pages SET status='pending', error=NULL WHERE book_id=%s AND page_index IN ({ph}) AND status='failed'",
+            (book_id, *indices))
+
     overrides: Dict[str, Any] = {}
     if config:
         try:
@@ -1317,6 +1325,14 @@ async def translate_all_from_zip(
         indices = list(range(len(names)))
     if any(i < 0 or i >= len(names) for i in indices):
         raise HTTPException(400, detail="page_indices 超出范围")
+
+    # 重翻这些页：把旧 failed 清回 pending，避免书库进度页继续显示上一轮的失败数
+    if indices:
+        ph = ",".join(["%s"] * len(indices))
+        await run_in_threadpool(
+            db.execute,
+            f"UPDATE pages SET status='pending', error=NULL WHERE book_id=%s AND page_index IN ({ph}) AND status='failed'",
+            (book_id, *indices))
 
     overrides = json.loads(config) if config else {}
     cfg = deep_merge(S.DEFAULT_CONFIG, overrides)

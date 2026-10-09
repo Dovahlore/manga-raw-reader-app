@@ -1,11 +1,13 @@
 package com.mit.reader
 
+import android.app.Activity
 import android.app.Application
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
 import android.widget.Toast
@@ -162,8 +164,8 @@ class ReaderApp : Application() {
     /** 后台同步云端译文到本地时置 true（书库主页显示小转圈）。 */
     var syncingTranslations by mutableStateOf(false)
         private set
-    /** 服务器是否可达（书库/进度页顶栏显示绿点=在线 / 红点=离线）。 */
-    var serverOnline by mutableStateOf(true)
+    /** 服务器是否可达（书库/进度页顶栏显示绿点=在线 / 红点=离线）。默认未连接，首次 ping 成功才置真。 */
+    var serverOnline by mutableStateOf(false)
         private set
     /** 书库内容版本号：后台导入（下载完成 / 扫描文件夹）新增书后自增，书库页据此自动刷新。 */
     var libraryRevision by mutableStateOf(0)
@@ -1225,6 +1227,7 @@ class ReaderApp : Application() {
         refreshAccountUsage()
         startBackgroundSync()
         startConnectivityMonitor()
+        registerForegroundPing()
         // 设备对传：接收方起本地 HTTP 服务 + NSD 广播；发送方按需发现
         transferClient = TransferClient(
             this,
@@ -1509,6 +1512,27 @@ class ReaderApp : Application() {
     /** 异步刷新在线状态（保存配置后让绿点即时反映新地址连通性）。 */
     fun refreshServerStatus() {
         appScope.launch { serverOnline = api.ping().startsWith("OK") }
+    }
+
+    // 息屏/切后台一段时间后，Doze 会限制后台网络，30s ping 会失败把绿点刷成「未连接」；
+    // 回到前台时立刻补 ping 一次，避免显示过期的「未连接」。
+    private var lastForegroundPingAt = 0L
+
+    private fun registerForegroundPing() {
+        registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityResumed(activity: Activity) {
+                val now = System.currentTimeMillis()
+                if (now - lastForegroundPingAt < 5_000) return
+                lastForegroundPingAt = now
+                refreshServerStatus()
+            }
+            override fun onActivityPaused(activity: Activity) {}
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+            override fun onActivityStarted(activity: Activity) {}
+            override fun onActivityStopped(activity: Activity) {}
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+            override fun onActivityDestroyed(activity: Activity) {}
+        })
     }
 
     private fun formatAccountBytes(bytes: Long): String = when {
