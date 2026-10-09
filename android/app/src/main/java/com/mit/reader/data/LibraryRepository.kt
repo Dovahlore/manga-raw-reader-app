@@ -843,6 +843,13 @@ class LibraryRepository(private val context: Context) {
         readIndexData().books.find { it.id == book.id } ?: book.copy(cloudId = null)
     }
 
+    /** 本地书按内容 hash 挂到已有云端书（离线导入的书联网后匹配上，之后能拉云端译文）。 */
+    suspend fun attachCloudId(bookId: String, cloudId: String) = withContext(Dispatchers.IO) {
+        val d = readIndexData()
+        if (d.books.none { it.id == bookId }) return@withContext
+        writeIndex(d.books.map { if (it.id == bookId) it.copy(cloudId = cloudId) else it }, d.folders)
+    }
+
     /** 云端书被删（或已排队删除）后，把本地挂着同一 cloudId 的书脱钩，并清掉封面缓存。 */
     suspend fun detachCloudByCloudId(cloudId: String) = withContext(Dispatchers.IO) {
         cloudCoverFile(cloudId).delete()

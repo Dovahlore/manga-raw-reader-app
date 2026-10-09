@@ -1231,6 +1231,17 @@ class ReaderApp : Application() {
         }
     }
 
+    /** 本地书按内容 hash 匹配已有云端书并挂 cloudId（离线导入的书联网后补挂，之后能拉云端译文）。 */
+    private suspend fun syncCloudIdMatch() {
+        val list = runCatching { api.cloudList() }.getOrNull() ?: return
+        val byHash = list.mapNotNull { c -> c.hash?.takeIf { it.isNotBlank() }?.let { it to c.id } }.toMap()
+        if (byHash.isEmpty()) return
+        for (b in library.books().filter { it.cloudId == null && it.hash.isNotEmpty() }) {
+            val cid = byHash[b.hash] ?: continue
+            runCatching { library.attachCloudId(b.id, cid) }
+        }
+    }
+
     /** 需要联网的操作先检查；离线时提示并拦截。 */
     private fun requireOnline(): Boolean {
         if (serverOnline) return true
@@ -1374,7 +1385,7 @@ class ReaderApp : Application() {
         prefs.edit().remove("active_storage_migration").apply()
     }
 
-    /** 轻量同步：补删/补取消/收藏夹/阅读进度/书元数据（不含译文图补拉）。 */
+    /** 轻量同步：补删/补取消/收藏夹/阅读进度/书元数据/cloudId 匹配（不含译文图补拉）。 */
     private suspend fun syncLight() {
         runCatching { drainPendingDeletes() }
         runCatching { drainPendingCancels() }
@@ -1383,6 +1394,7 @@ class ReaderApp : Application() {
         runCatching { library.drainFolderSyncs() }
         runCatching { syncReadingProgressFromServer() }
         runCatching { syncBookMetadata() }
+        runCatching { syncCloudIdMatch() }
     }
 
     private var lastOnlineSyncAt = 0L
