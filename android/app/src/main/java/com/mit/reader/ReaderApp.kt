@@ -159,6 +159,8 @@ class ReaderApp : Application() {
     val queuedBookIds: List<String> get() = translateQueue.drop(1)
     var translatingProgress by mutableStateOf<Pair<Int, Int>?>(null)
         private set
+    /** 正在请求停止的书 id（点击「停止」后到服务端取消完成前）：按钮反馈「停止中…」+ 防重复请求。 */
+    val stoppingBookIds = mutableStateListOf<String>()
     /** 每本书最后一次已知的翻译进度 (done, total)：停止/完成后保留，进度页用，避免停止后进度消失或回跳。 */
     val progressHistory = mutableStateMapOf<String, Pair<Int, Int>>()
     /** 后台同步云端译文到本地时置 true（书库主页显示小转圈）。 */
@@ -1707,6 +1709,8 @@ class ReaderApp : Application() {
 
     /** 删除书 / 取消同步 / 点「停止」前调用：把书移出队列；并取消服务端该书的全部后台任务。 */
     fun stopTranslatingIf(bookId: String) {
+        if (bookId in stoppingBookIds) return   // 防重复点击：同一本只发一次取消请求
+        stoppingBookIds.add(bookId)
         val idx = translateQueue.indexOf(bookId)
         val wasRunning = idx == 0
         if (idx >= 0) translateQueue.removeAt(idx)
@@ -1720,10 +1724,14 @@ class ReaderApp : Application() {
         if (idx >= 0) persistQueue()
         // 按书取消服务端所有 queued/running 任务：覆盖进程被杀后遗留的重复 job（孤儿任务）
         appScope.launch {
-            val b = library.book(bookId)
-            if (b != null) {
-                val ok = runCatching { api.cancelBookJobs(b.serverId) }.getOrDefault(false)
-                if (!ok) recordPendingCancel(b.serverId)   // 离线/失败：记下，下次在线补取消
+            try {
+                val b = library.book(bookId)
+                if (b != null) {
+                    val ok = runCatching { api.cancelBookJobs(b.serverId) }.getOrDefault(false)
+                    if (!ok) recordPendingCancel(b.serverId)   // 离线/失败：记下，下次在线补取消
+                }
+            } finally {
+                stoppingBookIds.remove(bookId)
             }
         }
     }

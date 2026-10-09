@@ -20,8 +20,8 @@ android {
         applicationId = "com.mit.reader"
         minSdk = 26
         targetSdk = 34
-        versionCode = 27
-        versionName = "1.4.27"
+        versionCode = 28
+        versionName = "1.4.28"
     }
 
     signingConfigs {

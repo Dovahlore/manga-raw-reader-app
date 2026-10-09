@@ -2164,6 +2164,7 @@ private fun ProgressList(
                         isPreparing -> "准备中"
                         hasLegacyActiveJob -> "活动中"
                         done >= total && failed == 0 -> "已完成"
+                        done == 0 && failed >= total -> "全部失败"
                         failed > 0 && done + failed >= total -> "部分失败"
                         else -> ""   // 部分翻译但没在跑：不显示状态，只显示页数
                     }
@@ -2176,6 +2177,7 @@ private fun ProgressList(
                         isRunning = isRunning,
                         isQueued = isQueued,
                         coverFile = book.coverFile,
+                        stopping = book.id in app.stoppingBookIds,
                         onStop = { onStop(book) },
                     )
                 }
@@ -2204,6 +2206,7 @@ private fun ProgressList(
                         isQueued -> "排队中"
                         hasLegacyActiveJob -> "活动中"
                         total > 0 && done >= total && failed == 0 -> "已完成"
+                        done == 0 && failed >= total -> "全部失败"
                         failed > 0 && done + failed >= total -> "部分失败"
                         else -> ""
                     }
@@ -2401,6 +2404,7 @@ private fun BookProgressRow(
     cloud: Boolean = false,
     coverFile: File? = null,
     cloudCoverId: String? = null,
+    stopping: Boolean = false,
     onStop: () -> Unit,
 ) {
     val app = LocalContext.current.applicationContext as ReaderApp
@@ -2457,13 +2461,13 @@ private fun BookProgressRow(
                         color = when (status) {
                             "已完成" -> MaterialTheme.colorScheme.primary
                             "进行中" -> MaterialTheme.colorScheme.tertiary
-                            "部分失败" -> MaterialTheme.colorScheme.error
+                            "部分失败", "全部失败" -> MaterialTheme.colorScheme.error
                             else -> MaterialTheme.colorScheme.onSurfaceVariant
                         },
                     )
                 }
                 if (isActiveTask) {
-                    TextButton(onClick = onStop) { Text("停止") }
+                    TextButton(onClick = onStop, enabled = !stopping) { Text(if (stopping) "停止中…" else "停止") }
                 }
             }
             Text(
