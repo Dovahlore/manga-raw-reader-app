@@ -77,6 +77,7 @@ class TransferServer(
         @Volatile var completed: Boolean = false,
     )
     private val sessions = ConcurrentHashMap<String, Session>()
+    private val fileLocks = ConcurrentHashMap<String, Any>()
 
     private val registrationListener = object : NsdManager.RegistrationListener {
         override fun onServiceRegistered(info: NsdServiceInfo) {}
@@ -85,12 +86,21 @@ class TransferServer(
         override fun onUnregistrationFailed(info: NsdServiceInfo, errorCode: Int) {}
     }
 
+    /** 修复（02-中11）：接收服务启动失败向前台暴露（ReaderApp 透传到设备页红字提示）。 */
+    val startError = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+
     fun startReceiver() {
         try {
             start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
             android.util.Log.i("TransferServer", "对传接收服务已启动，端口 ${getListeningPort()}")
+            startError.value = null
         } catch (e: Exception) {
             android.util.Log.e("TransferServer", "对传接收服务启动失败", e)
+            startError.value = "端口绑定失败（${e.message ?: "未知错误"}）"
+        }
+        if (startError.value != null) {
+            runCatching { if (multicastLock.isHeld) multicastLock.release() }
+            return   // 服务没起来就不再广播 NSD，避免「看得到连不上」
         }
         multicastLock.acquire()
         if (discoverable) registerService(getListeningPort())
@@ -99,7 +109,7 @@ class TransferServer(
     /** 可被发现（NSD 广播）开关：关闭后其他设备搜索不到本机，手动 IP:端口 连接不受影响。 */
     fun setDiscoverable(enabled: Boolean) {
         discoverable = enabled
-        if (enabled && !nsdRegistered) {
+        if (enabled && !nsdRegistered && startError.value == null) {
             registerService(getListeningPort())
         } else if (!enabled && nsdRegistered) {
             runCatching { unregisterService() }
@@ -152,7 +162,9 @@ class TransferServer(
             else -> newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "not found")
         }
     } catch (e: Exception) {
-        newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", e.message ?: "error")
+        // 修复（02-低1）：对外固定文案，内部细节只进日志
+        android.util.Log.w("TransferServer", "请求处理失败: ${e.message}")
+        newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "请求处理失败")
     }
 
     // ---------------------------------------------------------------- remote control
@@ -294,6 +306,9 @@ class TransferServer(
         require(startOffset in 0..entry.size) { "非法续传偏移" }
         val contentLength = session.headers["content-length"]?.toLongOrNull() ?: 0L
         require(startOffset + contentLength <= entry.size) { "上传大小超过清单" }
+        // 修复（02-中13）：同一会话同一文件串行写，防两线程交错 setLength/追加写损坏数据
+        val fileLock = fileLocks.computeIfAbsent("$sessionId/$relPath") { Any() }
+        synchronized(fileLock) {
         RandomAccessFile(part, "rw").use { it.setLength(startOffset) }
         // 只读 Content-Length 个字节就停：客户端发完 body 后仍保持连接等响应，读到 EOF 会一直阻塞
         var remaining = contentLength
@@ -329,6 +344,7 @@ class TransferServer(
             notifyProgress(st, sessionId)
         }
         return jsonResponse(JSONObject().put("ok", true).put("received", received))
+        }
     }
 
     // ---------------------------------------------------------------- /complete
@@ -339,9 +355,10 @@ class TransferServer(
         val st = validSession(sessionId) ?: return badRequest("未知会话")
         if (st.token != token) return unauthorizedTransfer()
         if (st.completed) return jsonResponse(JSONObject().put("ok", true).put("duplicate", true))
-        st.completed = true
         val manifestJson = File(st.stagingDir, "manifest.json").readText()
+        // 修复（02-中12/05-中4）：先导入成功再置 completed——导入失败保留会话可重试，不再「假成功」
         val result = importBook(st.stagingDir, manifestJson)
+        st.completed = true
         sessions.remove(sessionId)
         runCatching { st.stagingDir.deleteRecursively() }
         return jsonResponse(JSONObject().apply {
@@ -434,6 +451,7 @@ class TransferServer(
         .put("ok", ok)
         .put("reason", reason ?: "")
         .put("readerActive", readerActive)
+        .put("revoked", revoked)
         .put("reader", reader.toJson())
 
     private fun RemoteCommandAck.toJson(): JSONObject = JSONObject()

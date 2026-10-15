@@ -42,6 +42,7 @@ object ArchiveParser {
      */
     fun extractMulti(pack: File, outRoot: File): List<ParsedBook> {
         val books = mutableListOf<ParsedBook>()
+        val budget = ExtractBudget()   // 05-中3：单次解压预算（累计字节 ≤ 2GB、图片条目 ≤ 20000）+ 失败页计数
         if (isRar(pack)) {
             val tmp = File(outRoot, "rar_tmp").apply { mkdirs() }
             try {
@@ -52,9 +53,18 @@ object ArchiveParser {
                     .sortedWith { a, b -> naturalCompare(a, b) }
                     .toList()
                 require(rels.isNotEmpty()) { "压缩包里没找到图片（支持 jpg/png/webp/gif/bmp/avif）" }
+                requireExtractBudget(rels.size)
                 groupsOf(rels, pack.nameWithoutExtension).forEachIndexed { gi, group ->
                     books += writeGroup(outRoot, gi, group) { relPath, dest ->
-                        moveInto(File(tmp, relPath), dest) != null
+                        val src = File(tmp, relPath)
+                        val ok = moveInto(src, dest) != null
+                        if (ok) {
+                            budget.addBytes(dest.length())   // RAR 已被 native 库整包解出，至少把入库量纳入预算
+                            budget.addEntry()
+                        } else {
+                            budget.failed++
+                        }
+                        ok
                     }
                 }
             } finally {
@@ -70,15 +80,27 @@ object ArchiveParser {
                     .forEach { byRel[it.name.replace('\\', '/')] = it }
                 val rels = byRel.keys.sortedWith { a, b -> naturalCompare(a, b) }.toList()
                 require(rels.isNotEmpty()) { "压缩包里没找到图片（支持 jpg/png/webp/gif/bmp/avif）" }
+                requireExtractBudget(rels.size)
                 groupsOf(rels, pack.nameWithoutExtension).forEachIndexed { gi, group ->
                     books += writeGroup(outRoot, gi, group) { relPath, dest ->
                         val e = byRel[relPath] ?: return@writeGroup false
-                        writeStream(zip.getInputStream(e), dest) != null
+                        writeStream(zip.getInputStream(e), dest, budget) != null
                     }
                 }
             }
         }
+        // 05-中3：有解压失败的页就整包失败并报数，不再静默缺页入库
+        if (budget.failed > 0) {
+            throw IllegalStateException("${budget.failed} 页解压失败已跳过")
+        }
         return books
+    }
+
+    /** 图片条目数预检（05-中3）：超过上限直接中止，不再逐条解压。 */
+    private fun requireExtractBudget(count: Int) {
+        if (count > ExtractBudget.MAX_ENTRIES) {
+            throw ArchiveExtractLimitException("压缩包图片条目数超过 ${ExtractBudget.MAX_ENTRIES} 上限，已中止导入")
+        }
     }
 
     private data class Group(val title: String, val paths: List<String>)
@@ -176,13 +198,25 @@ object ArchiveParser {
         }
     }
 
-    /** 流式写入到指定目标文件（合集拆分用）。 */
-    private fun writeStream(ins: InputStream, dest: File): File? = try {
-        ins.use { input -> dest.outputStream().use { input.copyTo(it) } }
-        dest
-    } catch (e: Exception) {
-        dest.delete()
-        null
+    /** 流式写入到指定目标文件（合集拆分用）；传 budget 时边写边计入解压预算，超限中止整包导入。 */
+    private fun writeStream(ins: InputStream, dest: File, budget: ExtractBudget? = null): File? {
+        return try {
+            ins.use { input ->
+                dest.outputStream().use { output ->
+                    val counted = if (budget != null) BudgetedInputStream(input, budget) else input
+                    counted.copyTo(output)
+                }
+            }
+            budget?.addEntry()
+            dest
+        } catch (e: ArchiveExtractLimitException) {
+            dest.delete()
+            throw e   // 超限必须中止整包导入，不能当单页失败吞掉
+        } catch (e: Exception) {
+            dest.delete()
+            budget?.let { it.failed++ }
+            null
+        }
     }
 
     /** 搬移到指定目标文件（合集拆分 / RAR 共用）。 */
@@ -241,4 +275,55 @@ object ArchiveParser {
         }
         return (a.length - i) - (b.length - j)
     }
+}
+
+/** 解压超限（字节/条目）专用异常：与「个别页损坏跳过」区分，超限必须中止整包导入。 */
+class ArchiveExtractLimitException(message: String) : IllegalStateException(message)
+
+/** 单次解压资源预算（05-中3，防 zip bomb）：累计字节 ≤ 2GB、图片条目 ≤ 20000；failed = 解压失败被跳过的页数。 */
+internal class ExtractBudget {
+    var bytes = 0L
+        private set
+    var entries = 0
+        private set
+    var failed = 0
+
+    /** 累计解压字节，超限抛 [ArchiveExtractLimitException]。 */
+    fun addBytes(n: Long) {
+        if (n <= 0L) return
+        bytes += n
+        if (bytes > MAX_BYTES) throw ArchiveExtractLimitException("解压数据累计超过 2GB 上限，已中止导入")
+    }
+
+    /** 累计成功解压的条目数，超限抛 [ArchiveExtractLimitException]。 */
+    fun addEntry() {
+        entries += 1
+        if (entries > MAX_ENTRIES) throw ArchiveExtractLimitException("解压条目数超过 ${MAX_ENTRIES} 上限，已中止导入")
+    }
+
+    companion object {
+        const val MAX_BYTES = 2L * 1024 * 1024 * 1024
+        const val MAX_ENTRIES = 20000
+    }
+}
+
+/** 计数输入流：边解压边累计字节，超限立即中止（避免单条目 zip bomb 写满磁盘后才被发现）。 */
+internal class BudgetedInputStream(
+    private val src: InputStream,
+    private val budget: ExtractBudget,
+) : InputStream() {
+    override fun read(): Int {
+        val r = src.read()
+        if (r >= 0) budget.addBytes(1L)
+        return r
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        val n = src.read(b, off, len)
+        if (n > 0) budget.addBytes(n.toLong())
+        return n
+    }
+
+    override fun available(): Int = src.available()
+    override fun close() = src.close()
 }

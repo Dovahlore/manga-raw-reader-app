@@ -289,9 +289,18 @@ private fun SettingsServerTab(
             Text(result, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 12.dp))
         }
         app.backgroundActions["ping-server"]?.let { action ->
-            val pingError = action.message.contains("失败") && !action.message.contains("未连接")
+            // 修复：服务器 401 时明确提示令牌失效，其余错误照旧展示原文。
+            // "HTTP 401: …" 格式由 TranslationApi 保证（ping() 非 2xx 直接返回该文案；其他接口抛
+            // ApiHttpException 后到 UI 层只剩 message 字符串），故按前缀分流而非类型 catch。
+            val tokenExpired = action.message.startsWith("HTTP 401")
+            val pingError = tokenExpired ||
+                (action.message.contains("失败") && !action.message.contains("未连接"))
             Text(
-                if (action.running) "正在测试连接…" else action.message,
+                when {
+                    action.running -> "正在测试连接…"
+                    tokenExpired -> "服务器令牌已失效，请在下方更新 API Token"
+                    else -> action.message
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = if (pingError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 4.dp),

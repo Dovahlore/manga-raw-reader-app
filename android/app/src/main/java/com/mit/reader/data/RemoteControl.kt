@@ -4,6 +4,7 @@ import android.os.Handler
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import java.security.SecureRandom
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -40,6 +41,7 @@ data class RemoteHostStatus(
     val reason: String?,
     val readerActive: Boolean,
     val reader: RemoteReaderSnapshot?,
+    val revoked: Boolean = false,
 )
 
 data class RemoteControllerConnection(
@@ -73,6 +75,14 @@ class RemoteControlManager(
     private var readerSnapshot: RemoteReaderSnapshot? = null
     private val recentRequestIds = LinkedHashSet<String>()
 
+    // ---- 修复（02-高1/03-高1/02-高2 部分）：配对节流、断开冷却、接受态跟踪 ----
+    private val secureRandom = SecureRandom()
+    private var pairFailures = 0
+    private var pairLockoutUntil = 0L
+    private var lastPairRejectReason: String? = null
+    private val suspendedUntil = mutableMapOf<String, Long>()
+    private var acceptedControllerId: String? = null
+
     init {
         appScope.launch {
             while (true) {
@@ -90,6 +100,7 @@ class RemoteControlManager(
                 pairingToken = ""
                 connectedControllerName = null
                 connectedControllerId = null
+                acceptedControllerId = null
                 readerHandler = null
                 readerSnapshot = null
             }
@@ -104,28 +115,65 @@ class RemoteControlManager(
             pairingToken = ""
             connectedControllerName = null
             connectedControllerId = null
+            acceptedControllerId = null
         }
     }
 
     fun pair(code: String, controllerName: String, controllerId: String): String? = synchronized(lock) {
-        if (!hostEnabled) return null
-        if (code.isBlank() || pairingCode.isBlank() || !code.equals(pairingCode, ignoreCase = true)) return null
+        // 修复（02-高1/03-高3）：失败节流+指数锁定；修复（02-高2 部分/03-低13）：每次配对轮换新凭据，
+        // 旧凭据随覆盖立即失效
+        val now = System.currentTimeMillis()
+        if (now < pairLockoutUntil) {
+            lastPairRejectReason = "尝试过于频繁，请 ${((pairLockoutUntil - now) / 1000) + 1} 秒后再试"
+            return null
+        }
+        if (!hostEnabled) {
+            lastPairRejectReason = "阅读端未开启遥控"
+            return null
+        }
+        if (code.isBlank() || pairingCode.isBlank() || !code.equals(pairingCode, ignoreCase = true)) {
+            lastPairRejectReason = "配对码错误"
+            pairFailures++
+            if (pairFailures >= 5) {
+                val backoff = (60_000L shl minOf(pairFailures - 5, 4)).coerceAtMost(10 * 60_000L)
+                pairLockoutUntil = now + backoff
+            }
+            return null
+        }
+        pairFailures = 0
+        pairLockoutUntil = 0L
         val activeControllerId = connectedControllerId
-        if (activeControllerId != null && activeControllerId != controllerId) return null
-        if (activeControllerId == controllerId && pairingToken.isNotBlank()) return pairingToken
+        if (activeControllerId != null && activeControllerId != controllerId) {
+            lastPairRejectReason = "已有其他遥控器连入"
+            return null
+        }
         val token = UUID.randomUUID().toString().replace("-", "")
         pairingToken = token
         connectedControllerName = controllerName.ifBlank { "遥控器" }.take(40)
         connectedControllerId = controllerId
+        acceptedControllerId = null
         lastSeenAt = System.currentTimeMillis()
+        lastPairRejectReason = null
         token
     }
 
+    /** 最近一次 pair 拒绝原因（宿主本地诊断用）。 */
+    fun lastPairReject(): String? = synchronized(lock) { lastPairRejectReason }
+
+    private fun isSuspendedInternal(deviceId: String): Boolean =
+        (suspendedUntil[deviceId] ?: 0L) > System.currentTimeMillis()
+
     fun heartbeat(token: String): RemoteHostStatus = synchronized(lock) {
         val reader = readerSnapshot
-        val authorized = authorizedController(token) ?: return RemoteHostStatus(
-            false, "设备未配对或已取消授权", false, null,
-        )
+        val authorized = authorizedController(token)
+        if (authorized == null) {
+            // 修复（02-中5/03-低10）：revoked=true 仅在凭据确实不匹配任何授权时返回，
+            // 控制端据此清理死记录；宿主暂时关被控等场景不再触发误删
+            return RemoteHostStatus(false, "设备未配对或已取消授权", false, null, revoked = true)
+        }
+        if (isSuspendedInternal(authorized.deviceId)) {
+            return RemoteHostStatus(false, "已被本机断开，请稍后再连接", false, null)
+        }
         if (!hostEnabled || !acceptController(authorized)) {
             return RemoteHostStatus(false, "遥控器未授权或已断开", false, null)
         }
@@ -143,6 +191,9 @@ class RemoteControlManager(
             val authorized = authorizedController(token) ?: return RemoteCommandAck(
                 false, false, "设备未配对或已取消授权", null,
             )
+            if (isSuspendedInternal(authorized.deviceId)) {
+                return RemoteCommandAck(false, false, "已被本机断开，请稍后再连接", null)
+            }
             if (!hostEnabled || !acceptController(authorized)) {
                 return RemoteCommandAck(false, false, "遥控器未授权或已断开", null)
             }
@@ -164,13 +215,22 @@ class RemoteControlManager(
 
         val latch = CountDownLatch(1)
         var result: RemoteReaderSnapshot? = null
-        mainHandler.post {
+        val task = Runnable {
+            // 修复（03-高2）：执行前在主线程再查一次 allowed，消除锁内查/锁外执行的 TOCTOU 窗口
+            val allowedNow = synchronized(lock) { readerInteractionAllowed }
             val handler = synchronized(lock) { readerHandler }
-            result = handler?.onCommand(action)
-            synchronized(lock) { readerSnapshot = result }
+            if (allowedNow && handler != null) {
+                result = handler.onCommand(action)
+                synchronized(lock) { readerSnapshot = result }
+            }
             latch.countDown()
         }
-        latch.await(2, TimeUnit.SECONDS)
+        mainHandler.post(task)
+        val executed = latch.await(2, TimeUnit.SECONDS)
+        if (!executed) {
+            // 修复（03-中5）：超时后撤掉未执行的命令，保证 ack 与实际翻页一致
+            mainHandler.removeCallbacks(task)
+        }
 
         return synchronized(lock) {
             if (result == null) {
@@ -213,6 +273,19 @@ class RemoteControlManager(
         readerInteractionAllowed = allowed
     }
 
+    /** 修复（03-高2）：会话阶段供 UI 判定——pending=有连入但未接受（远端命令必须被拒）。 */
+    fun sessionPhase(): String = synchronized(lock) {
+        when {
+            connectedControllerId == null -> "none"
+            acceptedControllerId != null && acceptedControllerId == connectedControllerId -> "accepted"
+            else -> "pending"
+        }
+    }
+
+    fun clearReaderInteractionAllowed() {
+        readerInteractionAllowed = false
+    }
+
     fun dispatchLocalCommand(action: RemotePageAction): RemoteReaderSnapshot? {
         val handler = synchronized(lock) { readerHandler } ?: return null
         val result = handler.onCommand(action)
@@ -231,17 +304,25 @@ class RemoteControlManager(
 
     fun disconnectController() {
         synchronized(lock) {
+            // 修复（03-中4）：连 id 一起清，避免旧设备「永久占坑」卡死后续配对；
+            // 修复（03-高1/02-中7）：断开即对该设备挂 60 秒冷却，凭已保存授权的心跳也会被拒
+            connectedControllerId?.let { suspendedUntil[it] = System.currentTimeMillis() + 60_000 }
+            acceptedControllerId = null
             pairingToken = ""
             connectedControllerName = null
+            connectedControllerId = null
         }
     }
 
     private fun expireSilentController() {
         synchronized(lock) {
-            if (connectedControllerName != null && System.currentTimeMillis() - lastSeenAt > 6_000) {
+            if ((connectedControllerName != null || connectedControllerId != null) &&
+                System.currentTimeMillis() - lastSeenAt > 6_000
+            ) {
                 pairingToken = ""
                 connectedControllerName = null
                 connectedControllerId = null
+                acceptedControllerId = null
             }
         }
     }
@@ -258,15 +339,18 @@ class RemoteControlManager(
     }
 
     private fun acceptController(device: PairedDevice): Boolean {
+        if (isSuspendedInternal(device.deviceId)) return false
         val activeControllerId = connectedControllerId
         if (activeControllerId != null && activeControllerId != device.deviceId) return false
         connectedControllerName = device.name.ifBlank { "遥控器" }.take(40)
         connectedControllerId = device.deviceId
+        acceptedControllerId = device.deviceId
         return true
     }
 
     private fun generatePairingCode(): String {
-        val value = (100000..999999).random()
+        // 修复（02-低4）：改用加密安全随机源
+        val value = secureRandom.nextInt(900000) + 100000
         return value.toString()
     }
 }

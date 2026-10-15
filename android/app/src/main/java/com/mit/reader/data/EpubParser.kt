@@ -32,13 +32,15 @@ object EpubParser {
 
             val out = mutableListOf<File>()
             var idx = 0
+            val budget = ExtractBudget()   // 05-中3：累计字节/条目上限（防 zip bomb）+ 失败页计数
             for (doc in spine) {
                 val docPath = if (opfDir.isEmpty()) doc else "$opfDir/$doc"
                 val entry = zip.entryOrNull(docPath) ?: continue
                 val text = try {
                     zip.readText(entry)
                 } catch (e: Exception) {
-                    continue   // 单个 XHTML 损坏就跳过，不影响其它页
+                    budget.failed++   // 单个 XHTML 损坏 = 该页解不出来，计数（05-中3）
+                    continue
                 }
                 val docDir = doc.substringBeforeLast('/', "")
                 for (href in docImageRefs(text)) {
@@ -49,14 +51,25 @@ object EpubParser {
                     idx++
                     val dest = File(pagesDir, "page-${idx.toString().padStart(3, '0')}.$ext")
                     try {
-                        zip.getInputStream(imgEntry).use { it.copyTo(dest.outputStream()) }
+                        budget.addEntry()
+                        zip.getInputStream(imgEntry).use { input ->
+                            dest.outputStream().use { output ->
+                                BudgetedInputStream(input, budget).copyTo(output)
+                            }
+                        }
                         out += dest
+                    } catch (e: ArchiveExtractLimitException) {
+                        dest.delete()   // 半截图片删掉
+                        throw e   // 05-中3：超限中止整本导入，不能当单页失败吞掉
                     } catch (e: Exception) {
                         dest.delete()   // 半截图片删掉
+                        budget.failed++
                     }
                 }
             }
             if (out.isEmpty()) throw IllegalStateException("这个 EPUB 里没找到图页（可能是纯文字书或文件损坏）")
+            // 05-中3：有解压失败的页就整本失败并报数，不再静默缺页入库
+            if (budget.failed > 0) throw IllegalStateException("${budget.failed} 页解压失败已跳过")
             return ParsedBook(title, out)
         }
     }

@@ -35,6 +35,7 @@ data class DiscoveredDevice(
     val name: String,
     val host: String,
     val port: Int,
+    val devid: String? = null,
 )
 
 /** 已配对设备：配对一次后，遥控和局域网传书共用这个授权。 */
@@ -51,6 +52,7 @@ data class RemotePairResult(
     val token: String,
     val hostDeviceId: String,
     val hostName: String,
+    val endpointMissing: Boolean = false,
 )
 
 /** 对端已有这本书（按内容 hash），分享被拦截。 */

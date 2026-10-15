@@ -31,7 +31,7 @@ class TransferClient(
     private val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
     private val multicastLock = wifiManager.createMulticastLock("mit:discovery").apply { setReferenceCounted(false) }
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val devices = LinkedHashMap<String, DiscoveredDevice>()
+    private val devices = java.util.concurrent.ConcurrentHashMap<String, DiscoveredDevice>()
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -45,7 +45,7 @@ class TransferClient(
             // 发现的是自己：服务方在 TXT 记录里广播了设备 ID
             if (info.attributes[NSD_KEY_DEVICE_ID]?.toString(Charsets.UTF_8) == ownDeviceId) return
             if (devices.containsKey(info.serviceName)) return
-            val d = DiscoveredDevice(info.serviceName, host, info.port)
+            val d = DiscoveredDevice(info.serviceName, host, info.port, info.attributes[NSD_KEY_DEVICE_ID]?.toString(Charsets.UTF_8))
             devices[info.serviceName] = d
             mainHandler.post { onDeviceFound(d) }
         }
@@ -87,6 +87,7 @@ class TransferClient(
         files: List<TransferFileEntry>,
         onStage: (String) -> Unit,
         onProgress: (Long, Long) -> Unit,
+        cancelled: () -> Boolean = { false },
     ): JSONObject {
         val base = "http://${device.host}:${device.port}"
         onStage("正在建立会话…")
@@ -105,16 +106,17 @@ class TransferClient(
         var sent = 0L
 
         toSend.forEach { entry ->
+            if (cancelled()) throw java.util.concurrent.CancellationException("发送已取消")
             val offset = getOffset(base, token, sessionId, entry.relPath)
             if (offset >= entry.size) {
                 sent += entry.size
                 onProgress(sent, totalBytes)
                 return@forEach
             }
-            putFile(base, token, sessionId, entry, offset) { delta ->
+            putFile(base, token, sessionId, entry, offset, onDelta = { delta ->
                 sent += delta
                 onProgress(sent, totalBytes)
-            }
+            }, cancelled = cancelled)
         }
 
         onStage("正在校验并导入…")
@@ -155,6 +157,7 @@ class TransferClient(
         entry: TransferFileEntry,
         offset: Long,
         onDelta: (Long) -> Unit,
+        cancelled: () -> Boolean = { false },
     ) {
         val body = object : RequestBody() {
             override fun contentType() = "application/octet-stream".toMediaType()
@@ -169,6 +172,7 @@ class TransferClient(
                         skip -= skipped
                     }
                     while (true) {
+                        if (cancelled()) throw java.util.concurrent.CancellationException("发送已取消")
                         val n = ins.read(buf)
                         if (n <= 0) break
                         sink.write(buf, 0, n)

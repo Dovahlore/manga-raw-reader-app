@@ -16,6 +16,10 @@ import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.util.concurrent.TimeUnit
 
+/** 非 2xx 响应异常：code 为 HTTP 状态码；message 保持原 "HTTP $code: …" 格式，
+ *  既有按 message 字符串判断的调用方逻辑不受影响。 */
+class ApiHttpException(val code: Int, message: String) : IllegalStateException(message)
+
 data class TranslateResp(val pageId: Int, val jobId: String?, val cached: Boolean)
 data class JobStatus(val status: String, val pageId: Int?, val error: String?)
 data class ActivePageJob(val jobId: String, val pageIndex: Int, val status: String)
@@ -126,7 +130,7 @@ class TranslationApi {
             val req = Request.Builder().url("$base/v1/pages/translate").authed().post(body).build()
             client.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${text.take(300)}")
+                if (!resp.isSuccessful) throw ApiHttpException(resp.code, "HTTP ${resp.code}: ${text.take(300)}")
                 val j = JSONObject(text)
                 TranslateResp(
                     pageId = j.optInt("page_id", -1),
@@ -140,7 +144,7 @@ class TranslationApi {
         val req = Request.Builder().url("$base/v1/jobs/$jobId").authed().build()
         client.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${text.take(200)}")
+            if (!resp.isSuccessful) throw ApiHttpException(resp.code, "HTTP ${resp.code}: ${text.take(200)}")
             val j = JSONObject(text)
             JobStatus(
                 status = j.optString("status"),
@@ -155,7 +159,7 @@ class TranslationApi {
             val req = Request.Builder().url("$base/v1/books/$bookId/active-page-jobs").authed().build()
             client.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${text.take(200)}")
+                if (!resp.isSuccessful) throw ApiHttpException(resp.code, "HTTP ${resp.code}: ${text.take(200)}")
                 val arr = JSONObject(text).optJSONArray("jobs") ?: JSONArray()
                 (0 until arr.length()).map { i ->
                     val o = arr.getJSONObject(i)
@@ -174,7 +178,7 @@ class TranslationApi {
             val req = Request.Builder().url("$base/v1/books").authed().build()
             client.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${text.take(200)}")
+                if (!resp.isSuccessful) throw ApiHttpException(resp.code, "HTTP ${resp.code}: ${text.take(200)}")
                 val j = JSONObject(text)
                 val arr = j.optJSONArray("books") ?: JSONArray()
                 (0 until arr.length()).map { i ->
@@ -198,7 +202,7 @@ class TranslationApi {
             val req = Request.Builder().url("$base/v1/books/$bookId/pages").authed().build()
             client.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${text.take(200)}")
+                if (!resp.isSuccessful) throw ApiHttpException(resp.code, "HTTP ${resp.code}: ${text.take(200)}")
                 val j = JSONObject(text)
                 val arr = j.optJSONArray("pages") ?: JSONArray()
                 (0 until arr.length()).map { i ->
@@ -236,7 +240,7 @@ class TranslationApi {
         val req = Request.Builder().url("$base/v1/books/translate-all").authed().post(builder.build()).build()
         client.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${text.take(300)}")
+            if (!resp.isSuccessful) throw ApiHttpException(resp.code, "HTTP ${resp.code}: ${text.take(300)}")
             JSONObject(text).optString("book_job_id").takeIf { it.isNotEmpty() }
                 ?: throw IllegalStateException("无 book_job_id")
         }
@@ -262,7 +266,7 @@ class TranslationApi {
         val req = Request.Builder().url("$base/v1/books/$bookId/translate-from-zip").authed().post(body.build()).build()
         client.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${text.take(300)}")
+            if (!resp.isSuccessful) throw ApiHttpException(resp.code, "HTTP ${resp.code}: ${text.take(300)}")
             JSONObject(text).optString("book_job_id").takeIf { it.isNotEmpty() }
                 ?: throw IllegalStateException("无 book_job_id")
         }
@@ -293,7 +297,7 @@ class TranslationApi {
             val req = Request.Builder().url("$base/v1/books/$bookId/pages/$pageIndex/translate").authed().post(body.build()).build()
             client.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${text.take(300)}")
+                if (!resp.isSuccessful) throw ApiHttpException(resp.code, "HTTP ${resp.code}: ${text.take(300)}")
                 JSONObject(text).optString("job_id").takeIf { it.isNotEmpty() }
                     ?: throw IllegalStateException("无 job_id")
             }
@@ -309,7 +313,7 @@ class TranslationApi {
         val req = Request.Builder().url("$base/v1/usage").authed().build()
         client.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${text.take(200)}")
+            if (!resp.isSuccessful) throw ApiHttpException(resp.code, "HTTP ${resp.code}: ${text.take(200)}")
             val j = JSONObject(text)
             val u = j.optJSONObject("usage")
             UsageInfo(
@@ -328,7 +332,7 @@ class TranslationApi {
             val req = Request.Builder().url(url).build()
             client.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${text.take(200)}")
+                if (!resp.isSuccessful) throw ApiHttpException(resp.code, "HTTP ${resp.code}: ${text.take(200)}")
                 val j = JSONObject(text)
                 AppUpdate(
                     latest = j.optBoolean("latest", false),
@@ -385,7 +389,7 @@ class TranslationApi {
             val req = Request.Builder().url("$base/v1/sync").authed().post(body).build()
             client.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
+                if (!resp.isSuccessful) throw ApiHttpException(resp.code, "HTTP ${resp.code}")
                 JSONObject(text)
             }
         }
@@ -452,7 +456,7 @@ class TranslationApi {
         val req = Request.Builder().url("$base/v1/cloud/books").authed().post(body.build()).build()
         client.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${text.take(300)}")
+            if (!resp.isSuccessful) throw ApiHttpException(resp.code, "HTTP ${resp.code}: ${text.take(300)}")
             val j = JSONObject(text)
             CloudUploadResp(j.getString("book_id"), j.optBoolean("existed", false))
         }
@@ -463,7 +467,7 @@ class TranslationApi {
         val req = Request.Builder().url("$base/v1/cloud/books").authed().build()
         client.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${text.take(200)}")
+            if (!resp.isSuccessful) throw ApiHttpException(resp.code, "HTTP ${resp.code}: ${text.take(200)}")
             val arr = JSONObject(text).optJSONArray("books") ?: JSONArray()
             (0 until arr.length()).map { i ->
                 val o = arr.getJSONObject(i)
@@ -488,7 +492,7 @@ class TranslationApi {
         val req = Request.Builder().url("$base/v1/cloud/folders").authed().build()
         client.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${text.take(200)}")
+            if (!resp.isSuccessful) throw ApiHttpException(resp.code, "HTTP ${resp.code}: ${text.take(200)}")
             val arr = JSONObject(text).optJSONArray("folders") ?: JSONArray()
             (0 until arr.length()).map { i ->
                 val o = arr.getJSONObject(i)
@@ -553,7 +557,7 @@ class TranslationApi {
             extraHeaders.forEach { (k, v) -> if (v.isNotBlank()) builder.header(k, v) }
             val req = builder.build()
             downloadClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
+                if (!resp.isSuccessful) throw ApiHttpException(resp.code, "HTTP ${resp.code}")
                 val body = resp.body ?: throw IllegalStateException("空响应")
                 val total = body.contentLength()
                 body.byteStream().use { ins ->

@@ -9,6 +9,9 @@ import java.io.File
  */
 object MobiParser {
 
+    // 05-中7：MOBI 是全内存解析（readBytes + 解压缓冲 + 字符串拼接），大文件直接 OOM——按文件大小拦截
+    private const val MAX_MOBI_BYTES = 150L * 1024 * 1024
+
     private val JPEG = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte())
     private val PNG = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47)
     private val GIF87 = "GIF87a".toByteArray(Charsets.US_ASCII)
@@ -16,6 +19,7 @@ object MobiParser {
     private val SIGS = listOf(JPEG, PNG, GIF87, GIF89)
 
     fun extract(mobi: File, bookDir: File): ParsedBook {
+        if (mobi.length() > MAX_MOBI_BYTES) throw IllegalStateException("MOBI 文件过大，暂不支持")
         val pagesDir = File(bookDir, "pages").apply { mkdirs() }
         val data = mobi.readBytes()
         if (data.size < 78) throw IllegalStateException("不是有效的 MOBI 文件")

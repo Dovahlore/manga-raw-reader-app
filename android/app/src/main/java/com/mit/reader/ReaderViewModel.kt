@@ -25,6 +25,7 @@ data class PageState(
     val jobId: String? = null,
     val translatedFile: File? = null,
     val error: String? = null,
+    val startedAt: Long = 0L, // 进入 RUNNING 的时刻（死状态/超时判定用），其余状态为 0
 )
 
 class ReaderViewModel(private val app: Application) : AndroidViewModel(app) {
@@ -40,11 +41,32 @@ class ReaderViewModel(private val app: Application) : AndroidViewModel(app) {
     var autoMode by mutableStateOf(false)
         private set
 
+    /** 当前页 RUNNING 持续超过 [STALE_THRESHOLD_MS] 仍无结果（疑似失败事件丢失的死状态），
+     *  Compose 可观察；阅读器重试按钮据此在「翻译中」时解禁。 */
+    var translationStale by mutableStateOf(false)
+        private set
+
     val pageStates = mutableStateMapOf<Int, PageState>()
 
     private val pages: List<File> get() = book?.pageFiles ?: emptyList()
     private var watchJob: Job? = null
     private var restoreJob: Job? = null
+    // 单页 RUNNING 轮询协程（按页记录：手动重置重翻时先取消旧轮询，避免双循环抢写状态）
+    private val pollJobs = mutableMapOf<Int, Job>()
+
+    init {
+        // 死状态看门狗：每秒检查当前页 RUNNING 时长，超阈值置 translationStale（重试按钮解禁）。
+        // 覆盖所有 RUNNING 来源：translatePage 发起的、load() 恢复的服务端进行中页。
+        viewModelScope.launch {
+            while (true) {
+                delay(1_000)
+                val st = pageStates[currentPage]
+                translationStale = st?.status == PageStatus.RUNNING &&
+                    st.startedAt > 0L &&
+                    System.currentTimeMillis() - st.startedAt > STALE_THRESHOLD_MS
+            }
+        }
+    }
 
     fun load(b: Book) {
         book = b
@@ -79,6 +101,7 @@ class ReaderViewModel(private val app: Application) : AndroidViewModel(app) {
                             status = PageStatus.RUNNING,
                             translatedFile = readerApp.library.translatedCacheFile(b.id, index)
                                 .takeIf { it.exists() && it.length() > 0L },
+                            startedAt = System.currentTimeMillis(),
                         )
                     }
                 }
@@ -140,6 +163,8 @@ class ReaderViewModel(private val app: Application) : AndroidViewModel(app) {
         val state = pageStates[currentPage]
         val done = state?.status == PageStatus.DONE || state?.translatedFile != null
         showOriginal = false
+        // 手动重试后重新计时 RUNNING 时长（死状态看门狗以 startedAt 为准，这里立即复位按钮态）
+        translationStale = false
         translatePage(currentPage, force = done, manual = true)
     }
 
@@ -159,21 +184,47 @@ class ReaderViewModel(private val app: Application) : AndroidViewModel(app) {
         val b = book ?: return
         if (index !in pages.indices) return
         val previous = pageStates[index]
-        if (previous?.status == PageStatus.RUNNING) return
+        // manual/force 请求优先于 RUNNING 拦截：手动点按或强制重翻可以把卡死的 RUNNING 重置重翻，
+        // 避免「失败事件丢失 → 永久翻译中」的死状态无法恢复（04-高3）
+        if (previous?.status == PageStatus.RUNNING && !manual && !force) return
         if (!manual && previous?.status != PageStatus.IDLE) return
         if (!force && previous?.status == PageStatus.DONE) return
         val startedAt = System.currentTimeMillis()
         val preservedFile = if (force || manual) previous?.translatedFile else null
-        pageStates[index] = PageState(status = PageStatus.RUNNING, translatedFile = preservedFile)
-        viewModelScope.launch {
+        pageStates[index] = PageState(
+            status = PageStatus.RUNNING,
+            translatedFile = preservedFile,
+            startedAt = startedAt,
+        )
+        // 取消该页旧轮询再起新轮询（manual 重置 RUNNING 时旧循环还活着，不能叠加）
+        pollJobs.remove(index)?.cancel()
+        pollJobs[index] = viewModelScope.launch {
+            val deadline = startedAt + WATCH_TIMEOUT_MS
             while (pageStates[index]?.status == PageStatus.RUNNING) {
                 delay(2_000)
                 val cachedFile = readerApp.library.translatedCacheFile(b.id, index)
                 if (cachedFile.exists() && cachedFile.length() > 0 && cachedFile.lastModified() >= startedAt) {
                     pageStates[index] = PageState(status = PageStatus.DONE, translatedFile = cachedFile)
+                    return@launch
+                }
+                if (System.currentTimeMillis() >= deadline) {
+                    // 轮询总超时：不再无限等待，置 FAILED 让用户可以重试
+                    pageStates[index] = PageState(
+                        status = PageStatus.FAILED,
+                        translatedFile = preservedFile?.takeIf { it.exists() && it.length() > 0L },
+                        error = "翻译超时，可重试",
+                    )
+                    return@launch
                 }
             }
         }
         readerApp.translateBookPage(b, index, force)
+    }
+
+    private companion object {
+        /** RUNNING 持续超过此时长视为疑似死状态（重试按钮解禁）。 */
+        const val STALE_THRESHOLD_MS = 90_000L
+        /** 单页 RUNNING 轮询总超时：超过后置 FAILED，不再无限等待。 */
+        const val WATCH_TIMEOUT_MS = 180_000L
     }
 }

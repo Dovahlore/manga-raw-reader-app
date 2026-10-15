@@ -691,6 +691,8 @@ class LibraryRepository(private val context: Context) {
     }.getOrDefault(false)
 
     suspend fun delete(id: String) = withContext(Dispatchers.IO) {
+        // 05-高1：SD 库根缺席时拒绝删书（先于删文件），避免「文件已删、索引写不进」的半删状态
+        requireLibraryRootWritable()
         allLibraryStorageRoots().forEach { base ->
             File(base, "library/$id").deleteRecursively()
             File(base, "translated/$id").deleteRecursively()
@@ -715,6 +717,9 @@ class LibraryRepository(private val context: Context) {
         // 2) 删已删书的孤儿目录。只检查 library/translated 的子目录；
         // 存储根下的 library、translated、cloud_covers 本身不是书 id，绝不能删除。
         allLibraryStorageRoots().forEach { storageRoot ->
+            // 05-高1 双保险之一：库根当前不可用（SD 未挂载/挂载失败）就整根跳过清理。
+            // 缺席根下的目录是「暂时读不到」，不是孤儿，绝不能删。
+            if (!storageRoot.isDirectory) return@forEach
             File(storageRoot, "library").listFiles { f -> f.isDirectory }?.forEach { dir ->
                 if (dir.name !in ids) dir.deleteRecursively()
             }
@@ -878,6 +883,18 @@ class LibraryRepository(private val context: Context) {
         val d = readIndexData()
         if (d.books.none { it.cloudId == cloudId }) return@withContext
         writeIndex(d.books.map { if (it.cloudId == cloudId) it.copy(cloudId = null) else it }, d.folders)
+    }
+
+    /**
+     * 解除一本书的云端同步绑定（新契约；ReaderApp 翻译遇「服务端无此书 404」时调用）。
+     * 语义：Book.serverId 是派生值（cloudId ?: hash，见 Book.kt），本地没有独立的 serverId 字段可清，
+     * 等价操作 = 把该书的 cloudId 置空并写回索引，serverId 随之回落到 hash（未同步书的服务端身份）。
+     * 幂等：书不存在时静默返回。
+     */
+    suspend fun clearServerBinding(bookId: String) = withContext(Dispatchers.IO) {
+        val d = readIndexData()
+        if (d.books.none { it.id == bookId }) return@withContext
+        writeIndex(d.books.map { if (it.id == bookId) it.copy(cloudId = null) else it }, d.folders)
     }
 
     /** 重命名书名（空白则忽略）。 */
@@ -1581,10 +1598,22 @@ class LibraryRepository(private val context: Context) {
     private fun readIndexData(): IndexData {
         indexCache?.let { return it }
         if (!indexFile.exists()) return IndexData(emptyList(), emptyList())
-        val text = indexFile.readText()
+        // 05-中1：解析失败不再直接当空库——否则下一次写就以空库整表覆盖，随后 cleanupOrphans 会清光书目录。
+        val parsed = runCatching { parseIndexText(indexFile.readText()) }.getOrNull()
+        if (parsed != null) return parsed.also { indexCache = it }
+        // 损坏：先留证，再尝试从 index.json.bak 恢复；两者都没有才返回空列表。
+        preserveCorruptIndex()
+        val restored = restoreIndexFromBackup()
+        if (restored != null) return restored.also { indexCache = it }
+        return IndexData(emptyList(), emptyList())
+    }
+
+    /** 解析 index 文本（老版纯数组 / 新对象格式统一入口）；解析不了抛异常，由调用方决定降级。 */
+    private fun parseIndexText(text: String): IndexData {
         // 老版本是纯数组（只有 books），迁移成新格式
         runCatching { JSONArray(text) }.getOrNull()?.let { return IndexData(parseBooks(it), emptyList()) }
-        val obj = runCatching { JSONObject(text) }.getOrNull() ?: return IndexData(emptyList(), emptyList())
+        val obj = runCatching { JSONObject(text) }.getOrNull()
+            ?: throw IllegalStateException("index.json 不是有效 JSON")
         val books = obj.optJSONArray("books")?.let { parseBooks(it) } ?: emptyList()
         val folders = obj.optJSONArray("folders")?.let { fa ->
             (0 until fa.length()).map { i ->
@@ -1592,7 +1621,63 @@ class LibraryRepository(private val context: Context) {
                 Folder(o.getString("id"), o.optString("name", "未命名"))
             }
         } ?: emptyList()
-        return IndexData(books, folders).also { indexCache = it }
+        return IndexData(books, folders)
+    }
+
+    /** index.json 损坏留证：复制为 index.json.corrupt（覆盖旧证据），供事后排查；失败不影响主流程。 */
+    private fun preserveCorruptIndex() {
+        runCatching { indexFile.copyTo(File(internalRoot, "index.json.corrupt"), overwrite = true) }
+    }
+
+    /** 从 index.json.bak 恢复：bak 能完整解析才恢复（tmp+rename 回 index.json），否则当作没有备份。 */
+    private fun restoreIndexFromBackup(): IndexData? {
+        val bak = File(internalRoot, "index.json.bak")
+        if (!bak.exists()) return null
+        val bakText = bak.readText()
+        val data = runCatching { parseIndexText(bakText) }.getOrNull() ?: return null
+        val ok = runCatching {
+            val tmp = File(internalRoot, "index.json.tmp")
+            tmp.writeText(bakText)
+            if (!tmp.renameTo(indexFile)) {
+                indexFile.delete()
+                if (!tmp.renameTo(indexFile)) {
+                    tmp.delete()
+                    return@runCatching false
+                }
+            }
+            true
+        }.getOrDefault(false)
+        return if (ok) data else null
+    }
+
+    /** index.json 成功写入后同步维护 index.json.bak（tmp+rename），作为损坏时可恢复的最后一份好内容。 */
+    private fun backupIndexFile() {
+        runCatching {
+            val tmp = File(internalRoot, "index.json.bak.tmp")
+            indexFile.copyTo(tmp, overwrite = true)
+            val bak = File(internalRoot, "index.json.bak")
+            if (bak.exists() && !bak.delete()) {
+                tmp.delete()
+                return
+            }
+            if (!tmp.renameTo(bak)) tmp.delete()
+        }
+    }
+
+    /**
+     * 05-高1 双保险之二：写索引前检查「配置的 SD 库根」当前是否可用。
+     * SD 缺席时 selectedLibraryRoot 静默回退内部根、parseBooks 会丢掉 pages 读不到的 SD 书条目，
+     * 此时任何一次整表写都会把 SD 书抹出索引，SD 归来后被 cleanupOrphans 物理删除——
+     * 所以只要配置的 SD 库根不在位，就拒绝一切索引写（导入/删除/改名/移动/云下载/对传导入全部经过这里）。
+     */
+    private fun requireLibraryRootWritable() {
+        val configured = ServerConfig.libraryStorageDir?.takeIf { it.isNotBlank() } ?: return
+        // 配置目录不在 externalFilesDirs 里（不该发生）→ 交回 selectedLibraryRoot 的既有回退逻辑，不拦
+        val sdRoot = context.getExternalFilesDirs(null)
+            .firstOrNull { it.absolutePath == configured } ?: return
+        if (!sdRoot.isDirectory) {
+            throw IllegalStateException("SD 卡书库当前不可用，已暂停写入以保护书库")
+        }
     }
 
     private fun parseBooks(arr: JSONArray): List<Book> {
@@ -1624,6 +1709,7 @@ class LibraryRepository(private val context: Context) {
     }
 
     private fun writeIndex(books: List<Book>, folders: List<Folder>) {
+        requireLibraryRootWritable()
         val obj = JSONObject()
         val barr = JSONArray()
         books.forEach { b ->
@@ -1662,5 +1748,6 @@ class LibraryRepository(private val context: Context) {
         } else {
             indexCache = data
         }
+        backupIndexFile()   // 05-中1：写成功后同步维护 .bak，供损坏时恢复
     }
 }

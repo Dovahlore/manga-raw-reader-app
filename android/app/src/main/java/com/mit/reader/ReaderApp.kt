@@ -192,6 +192,7 @@ class ReaderApp : Application() {
         private set
     val libraryImports = mutableStateMapOf<String, LibraryImportStatus>()
     val backgroundActions = mutableStateMapOf<String, BackgroundActionStatus>()
+    private val backgroundJobs = mutableMapOf<String, Job>()
     val cloudSubmittingIds = mutableStateListOf<String>()
     private val libraryScanMutex = Mutex()
     @Volatile private var folderSyncRunning = false
@@ -362,15 +363,21 @@ class ReaderApp : Application() {
     private fun runBackgroundAction(
         key: String,
         useStorageGate: Boolean = true,
+        supersede: Boolean = false,
         action: suspend () -> Unit,
     ) {
-        if (backgroundActions[key]?.running == true) return
+        // 修复（04-H3 尾巴）：supersede=true 时先取消同 key 旧任务再启动，
+        // 手动重试同一页翻译不再被旧任务的去重挡住
+        if (backgroundActions[key]?.running == true) {
+            if (!supersede) return
+            backgroundJobs.remove(key)?.cancel()
+        }
         val queuedForMigration = useStorageGate && storageMigrationStatus?.running == true
         backgroundActions[key] = BackgroundActionStatus(
             BackgroundActionState.RUNNING,
             if (queuedForMigration) "排队中：等待存储搬运" else "正在处理…",
         )
-        appScope.launch {
+        backgroundJobs[key] = appScope.launch {
             try {
                 if (useStorageGate) storageGate.withLock { action() } else action()
                 if (queuedForMigration) backgroundActions[key] = BackgroundActionStatus(BackgroundActionState.RUNNING, "正在处理…")
@@ -381,6 +388,8 @@ class ReaderApp : Application() {
                 backgroundActions[key] = BackgroundActionStatus(BackgroundActionState.FAILED, e.message ?: "操作失败")
                 Toast.makeText(this@ReaderApp, "操作失败：${e.message}", Toast.LENGTH_LONG).show()
             } finally {
+                // 04-H3 尾巴：只清自己名下的 Job，防止被 supersede 的旧任务误删新条目
+                if (backgroundJobs[key] === kotlin.coroutines.coroutineContext[Job]) backgroundJobs.remove(key)
                 delay(3_000)
                 backgroundActions.remove(key)
             }
@@ -811,7 +820,7 @@ class ReaderApp : Application() {
     /** 每下好一页译文图就发一次事件 (bookId, pageIndex)：阅读器按书订阅，免轮询。 */
     private val _pageTranslated = MutableSharedFlow<Pair<String, Int>>(extraBufferCapacity = 64)
     val pageTranslated: SharedFlow<Pair<String, Int>> = _pageTranslated.asSharedFlow()
-    private val _pageTranslationFailed = MutableSharedFlow<Triple<String, Int, String?>>()
+    private val _pageTranslationFailed = MutableSharedFlow<Triple<String, Int, String?>>(extraBufferCapacity = 16)
     val pageTranslationFailed: SharedFlow<Triple<String, Int, String?>> = _pageTranslationFailed.asSharedFlow()
 
     suspend fun activePageJobs(book: Book): List<Int> =
@@ -824,7 +833,7 @@ class ReaderApp : Application() {
     }
 
     /** 单页翻译跑在应用级作用域；退出阅读器后结果仍写入本地缓存。 */
-    fun translateBookPage(book: Book, index: Int, force: Boolean) = runBackgroundAction("translate-page:${book.id}:$index") {
+    fun translateBookPage(book: Book, index: Int, force: Boolean) = runBackgroundAction("translate-page:${book.id}:$index", supersede = true) {
         if (!requireTranslationConfig()) {
             _pageTranslationFailed.tryEmit(Triple(book.id, index, "未配置模型 API Key"))
             return@runBackgroundAction
@@ -834,7 +843,9 @@ class ReaderApp : Application() {
             return@runBackgroundAction
         }
         try {
-            val image = book.pageFiles[index]
+            // 修复（05-低5）：服务端残留页码可能越界，显式兜底成可读错误
+            val image = book.pageFiles.getOrNull(index)
+                ?: throw IllegalStateException("页码超出本地范围：$index")
             val jobId = if (book.cloudId != null) {
                 api.translateFromServer(book.serverId, index, force)
             } else {
@@ -851,8 +862,20 @@ class ReaderApp : Application() {
             var pageId = -1
             var error: String? = null
             var tries = 0
+            var pollErrors = 0
             while (!finished && tries < 640) {
-                val status = api.job(jobId)
+                // 修复（04-M1）：轮询瞬时错误（网络抖动/5xx）不再立即判失败——
+                // 连续 3 次异常才放弃；服务端任务可能仍在跑且最终成功
+                val status = try {
+                    api.job(jobId).also { pollErrors = 0 }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (++pollErrors >= 3) throw e
+                    delay(2000)
+                    tries++
+                    continue
+                }
                 when (status.status) {
                     "done" -> { pageId = status.pageId ?: -1; finished = true }
                     "failed" -> { error = status.error ?: "翻译失败"; finished = true }
@@ -869,6 +892,11 @@ class ReaderApp : Application() {
             _pageTranslated.tryEmit(book.id to index)
         } catch (e: Exception) {
             val message = translationErrorMessage(e)
+            if (e.message?.contains("404") == true) {
+                // 修复（04-M3）：服务端已无此书（换账号/服务端清库）→ 解除绑定，避免永久 404
+                runCatching { library.clearServerBinding(book.id) }
+                Toast.makeText(this, "服务端未找到该书，已解除同步绑定；可重新同步后再翻译", Toast.LENGTH_LONG).show()
+            }
             if (force) {
                 runCatching {
                     val serverPage = api.bookPages(book.serverId).firstOrNull { it.pageIndex == index }
@@ -892,6 +920,16 @@ class ReaderApp : Application() {
     private fun clearSync(id: String) {
         syncTasks.remove(id)
     }
+
+    /** 设备对传发送任务表（可取消，修复 05-中6）；服务启动错误状态（修复 02-中11）。 */
+    private val shareJobs = mutableMapOf<String, Job>()
+
+    fun cancelShare(bookId: String) {
+        shareJobs.remove(bookId)?.cancel()
+    }
+
+    var serverStartError by mutableStateOf<String?>(null)
+        private set
 
     /** 同步一本书到云端：打包 → 上传 → 记录 cloudId。后台进行，不随页面销毁而中断。 */
     fun syncBook(book: Book) {
@@ -1286,6 +1324,7 @@ class ReaderApp : Application() {
     private var pairedDeviceRecords = emptyList<PairedDevice>()
     var pendingRemoteDeviceId by mutableStateOf<String?>(null)
         private set
+    private var pendingRemoteDeviceIdAt = 0L
 
     /** 可被发现（NSD 广播）：关闭后其他设备搜索不到本机，仍可通过 IP:端口 手动连接。 */
     var nsdDiscoverable by mutableStateOf(false)
@@ -1388,20 +1427,29 @@ class ReaderApp : Application() {
     }
 
     fun transferTokenFor(device: DiscoveredDevice): String? = synchronized(pairedDeviceLock) {
-        pairedDeviceRecords.firstOrNull { it.host == device.host || it.name == device.name }?.token
+        // 修复（05-中8）：优先按设备 ID（NSD TXT devid）精确匹配，其次 host:port 精确匹配；
+        // 不再用 name 模糊匹配——同型号撞名时凭据会发给错误设备
+        (pairedDeviceRecords.firstOrNull { device.devid != null && it.deviceId == device.devid }
+            ?: pairedDeviceRecords.firstOrNull { it.host == device.host && it.port == device.port })?.token
     }
 
     fun pairedDeviceFor(device: DiscoveredDevice): PairedDevice? = synchronized(pairedDeviceLock) {
-        pairedDeviceRecords.firstOrNull { it.host == device.host || it.name == device.name }
+        pairedDeviceRecords.firstOrNull { device.devid != null && it.deviceId == device.devid }
+            ?: pairedDeviceRecords.firstOrNull { it.host == device.host && it.port == device.port }
     }
 
     fun prepareRemoteConnect(deviceId: String) {
         pendingRemoteDeviceId = deviceId
+        pendingRemoteDeviceIdAt = SystemClock.elapsedRealtime()
     }
 
     fun consumePendingRemoteConnect(): PairedDevice? {
         val id = pendingRemoteDeviceId ?: return null
         pendingRemoteDeviceId = null
+        // 修复（02-低3）：超过 60 秒未消费的 pending 视为过期，避免下次进遥控器页意外自动连接
+        if (pendingRemoteDeviceIdAt != 0L && SystemClock.elapsedRealtime() - pendingRemoteDeviceIdAt > 60_000) {
+            return null
+        }
         return synchronized(pairedDeviceLock) { pairedDeviceRecords.firstOrNull { it.deviceId == id } }
     }
 
@@ -1474,6 +1522,21 @@ class ReaderApp : Application() {
             return
         }
         remoteControl.refreshPairingCode()
+        // 修复（02-高4 部分）：手动刷新配对码 = 吊销旧授权——清空所有已配对记录的凭据，
+        // 对端旧凭据立即失效，与提示「对方需重新输码才能再配对」语义一致。
+        // 记录本身保留，重新配对会写回新凭据；consent 60 秒续期走 refreshCode=false 不受影响。
+        revokeAllPairedCredentials()
+    }
+
+    private fun revokeAllPairedCredentials() {
+        val records = synchronized(pairedDeviceLock) {
+            pairedDeviceRecords = pairedDeviceRecords.map { r ->
+                PairedDevice(r.deviceId, r.name, r.host, r.port, "", r.lastConnectedAt)
+            }
+            pairedDevices = pairedDeviceRecords
+            pairedDeviceRecords
+        }
+        prefs.edit().putString("paired_devices", JSONArray(records.map(::pairedDeviceToJson)).toString()).apply()
     }
 
     fun disconnectRemoteHostController() {
@@ -1520,14 +1583,20 @@ class ReaderApp : Application() {
                         remoteControllerId,
                         localTransferEndpoint(),
                     )
-                    PairedDevice(
+                    val newDevice = PairedDevice(
                         deviceId = result.hostDeviceId,
                         name = result.hostName,
                         host = device.host,
                         port = device.port,
                         token = result.token,
                         lastConnectedAt = System.currentTimeMillis(),
-                    ).also(::upsertPairedDevice)
+                    )
+                    if (result.endpointMissing) {
+                        // 修复（02-中9）：对方上报不了本地地址 → 半残配对，提前告知用户
+                        Toast.makeText(this@ReaderApp, "对方设备未提供本地地址：向它传书/遥控可能不可用", Toast.LENGTH_LONG).show()
+                    }
+                    upsertPairedDevice(newDevice)
+                    newDevice
                 }
                 remoteControllerConnection = RemoteControllerConnection(device, paired.token)
                 remoteControllerMessage = "已连接 ${device.name}"
@@ -1582,7 +1651,12 @@ class ReaderApp : Application() {
                 if (!status.ok) {
                     remoteControllerConnection = null
                     remoteControllerReader = null
-                    remoteControllerMessage = status.reason ?: "遥控连接已断开"
+                    // 修复（02-中5/03-低10）：仅服务端明确 revoked 才给出触发清理的固定文案
+                    remoteControllerMessage = if (status.revoked) {
+                        status.reason ?: "设备未配对或已取消授权"
+                    } else {
+                        "遥控连接已断开（对方可能暂时离线）"
+                    }
                 } else {
                     remoteControllerReader = status.reader
                     remoteControllerMessage = if (status.readerActive) "已连接" else "等待阅读端打开书籍"
@@ -1600,6 +1674,7 @@ class ReaderApp : Application() {
     private fun startRemoteControllerHeartbeat() {
         remoteHeartbeatJob?.cancel()
         remoteHeartbeatJob = appScope.launch {
+            var failures = 0
             while (remoteControllerConnection != null) {
                 val connection = remoteControllerConnection ?: break
                 try {
@@ -1609,18 +1684,28 @@ class ReaderApp : Application() {
                     if (!status.ok) {
                         remoteControllerConnection = null
                         remoteControllerReader = null
-                        remoteControllerMessage = status.reason ?: "遥控连接已断开"
+                        // 修复（02-中5/03-低10）：仅服务端明确 revoked 才给出触发清理的固定文案
+                        remoteControllerMessage = if (status.revoked) {
+                            status.reason ?: "设备未配对或已取消授权"
+                        } else {
+                            "遥控连接已断开（对方可能暂时离线）"
+                        }
                         break
                     }
+                    failures = 0
                     remoteControllerReader = status.reader
                     remoteControllerMessage = if (status.readerActive) "已连接" else "等待阅读端打开书籍"
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    remoteControllerConnection = null
-                    remoteControllerReader = null
-                    remoteControllerMessage = "连接失败：${e.message ?: "网络错误"}"
-                    break
+                    // 修复（03-中6）：单次网络抖动不再拆会话（被控端 6 秒静默本就容忍抖动），连续 2 次才断
+                    failures++
+                    if (failures >= 2) {
+                        remoteControllerConnection = null
+                        remoteControllerReader = null
+                        remoteControllerMessage = "连接失败：${e.message ?: "网络错误"}"
+                        break
+                    }
                 }
                 delay(2_000)
             }
@@ -1635,10 +1720,21 @@ class ReaderApp : Application() {
         remoteControllerMessage = "已断开"
     }
 
+    /** 修复（02-低5）：只有被忘记设备正是当前遥控会话对端时才断开连接，避免误伤无关会话。 */
+    fun disconnectFromIf(deviceId: String) {
+        val conn = remoteControllerConnection ?: return
+        val rec = pairedDeviceFor(conn.device) ?: return
+        if (rec.deviceId == deviceId) disconnectRemoteController()
+    }
+
     fun sendRemoteCommand(action: RemotePageAction) {
         val connection = remoteControllerConnection ?: return
         val now = SystemClock.elapsedRealtime()
-        if (now - lastRemoteCommandAt < 160) return
+        if (now - lastRemoteCommandAt < 160) {
+            // 修复（03-低12）：节流丢弃不再静默，控制端能看到反馈
+            remoteControllerMessage = "命令过于频繁，已忽略"
+            return
+        }
         lastRemoteCommandAt = now
         appScope.launch {
             remoteCommandMutex.withLock {
@@ -1664,14 +1760,23 @@ class ReaderApp : Application() {
     }
 
     private fun updateRemoteReaderAvailability() {
-        remoteControl.updateReaderInteractionAllowed(applicationInForeground && readerScreenActive)
+        // 修复（03-高2）：遥控请求弹窗未决（pending）期间一律禁止远端命令，
+        // 不再只依赖 UI 层 500ms 压制补写；accepted/none 维持「前台+阅读器可见」判定。
+        val gated = if (remoteControl.sessionPhase() == "pending") {
+            false
+        } else {
+            applicationInForeground && readerScreenActive
+        }
+        remoteControl.updateReaderInteractionAllowed(gated)
     }
 
-    /** 发送一本书给选中设备（后台进行，书下方进度条展示）。 */
+    /** 发送一本书给选中设备（后台进行，书下方进度条展示；可从书卡菜单「取消发送」）。 */
     fun shareBook(book: Book, device: DiscoveredDevice) {
         if (shareTasks.containsKey(book.id)) return
         shareTasks[book.id] = SyncTask("准备中…", null)
-        appScope.launch {
+        val cancelFlag = AtomicBoolean(false)
+        var lastProgressAt = 0L
+        val job = appScope.launch {
             try {
                 withContext(Dispatchers.IO) {
                     val pkg = storageGate.withLock { library.transferPackage(book) }
@@ -1679,15 +1784,22 @@ class ReaderApp : Application() {
                     val paired = pairedDeviceFor(device)
                         ?: throw IllegalStateException("设备未配对，请先在遥控器模式完成配对")
                     client.send(device, paired.token, pkg.manifestJson, pkg.files,
+                        cancelled = { cancelFlag.get() },
                         onStage = { text ->
                             appScope.launch { shareTasks[book.id] = SyncTask(text, null) }
                         },
                         onProgress = { sent, total ->
-                            appScope.launch {
-                                shareTasks[book.id] = SyncTask(
-                                    "发送中…",
-                                    if (total > 0) sent.toFloat() / total else null,
-                                )
+                            // 修复（05-中6）：进度回调节流，每 200ms 至多刷新一次，避免主线程洪泛
+                            val now = System.currentTimeMillis()
+                            val finished = total > 0 && sent >= total
+                            if (now - lastProgressAt >= 200 || finished) {
+                                lastProgressAt = now
+                                appScope.launch {
+                                    shareTasks[book.id] = SyncTask(
+                                        "发送中…",
+                                        if (total > 0) sent.toFloat() / total else null,
+                                    )
+                                }
                             }
                         },
                     )
@@ -1699,14 +1811,18 @@ class ReaderApp : Application() {
             } catch (e: PeerHasBookException) {
                 Toast.makeText(this@ReaderApp, "对端已有这本书", Toast.LENGTH_SHORT).show()
             } catch (e: CancellationException) {
+                Toast.makeText(this@ReaderApp, "已取消发送《${book.title}》", Toast.LENGTH_SHORT).show()
                 throw e
             } catch (e: Exception) {
                 Toast.makeText(this@ReaderApp, "分享失败：${e.message}", Toast.LENGTH_LONG).show()
             } finally {
+                shareJobs.remove(book.id)
                 delay(2000)
                 shareTasks.remove(book.id)
             }
         }
+        shareJobs[book.id] = job
+        job.invokeOnCompletion { cancelFlag.set(true) }
     }
 
     // ---- 阅读进度同步（翻页防抖推后端 + 启动/定时拉后端）----
@@ -1848,7 +1964,7 @@ class ReaderApp : Application() {
                             )
                         )
                     }
-                    RemotePairResult(token, localDeviceId, Build.MODEL)
+                    RemotePairResult(token, localDeviceId, Build.MODEL, controllerEndpoint.isBlank())
                 }
             },
             remoteHeartbeat = { token -> remoteControl.heartbeat(token) },
@@ -1857,6 +1973,10 @@ class ReaderApp : Application() {
             },
             isTransferAuthorized = { token -> pairedDeviceByToken(token) != null },
         )
+        // 修复（02-中11）：接收服务启动失败时向前台暴露错误（设备页红字提示），不再静默
+        appScope.launch {
+            transferServer?.startError?.collect { serverStartError = it }
+        }
         transferServer?.startReceiver()
         nsdDiscoverable = prefs.getBoolean("nsd_discoverable", false)
         transferServer?.setDiscoverable(nsdDiscoverable)
@@ -2376,6 +2496,8 @@ class ReaderApp : Application() {
 
         var lastDone = -1
         var uploaded = prefs.getBoolean(upKey, false)
+        var lastSettledRound = -1
+        var stalledRounds = 0
 
         // 外层重试：网络错误（离线/服务端不可用）不退出、不把书移出队列，等几秒重试
         while (true) {
@@ -2395,8 +2517,7 @@ class ReaderApp : Application() {
                         } else {
                             api.translateAll(serverId, book.title, orderDir, total, pending, pending.map { book.pageFiles[it] })
                         }
-                        // 持久化 job_id，重启恢复后「停止」仍能取消服务端任务
-                        serverJobId?.let { prefs.edit().putString("job_id", it).apply() }
+                        // 旧 job_id 持久化已废弃（04-H2 恢复改依赖服务端 pending 页行）
                     }
                     uploaded = true
                     prefs.edit().putBoolean(upKey, true).apply()
@@ -2431,6 +2552,22 @@ class ReaderApp : Application() {
                     }
                     val settled = pages.count { it.status == "done" || it.status == "failed" }
                     if (pages.size >= total && settled >= total) return lastDone
+                    // 修复（04-H1/04-L3）：进度停滞守卫——服务端无在跑任务且 20 秒无任何页 settle
+                    // 就退出，避免被单页 job 顶替/任务丢失后 worker 在这里永久死等、饿死整个队列。
+                    if (settled != lastSettledRound) {
+                        lastSettledRound = settled
+                        stalledRounds = 0
+                    } else {
+                        stalledRounds++
+                    }
+                    if (stalledRounds >= 10) {
+                        val jobStatus = serverJobId?.let { runCatching { api.job(it).status }.getOrNull() }
+                        val jobActive = jobStatus == "queued" || jobStatus == "running"
+                        if (!jobActive) {
+                            throw IllegalStateException("翻译进度停滞（服务端无进行中任务），已退出；可重新发起全书翻译")
+                        }
+                        stalledRounds = 0
+                    }
                     delay(2000)
                 }
             } catch (e: CancellationException) {

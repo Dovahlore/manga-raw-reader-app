@@ -1,6 +1,7 @@
 package com.mit.reader.ui
 
 import android.os.SystemClock
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -92,13 +93,20 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
     val app = LocalContext.current.applicationContext as ReaderApp
     val scope = rememberCoroutineScope()
 
+    // 书已被删（同步另一端删除/本地记录丢失）时置 true：显示「书已不存在」并自动返回，不再静默空白屏
+    var bookMissing by remember { mutableStateOf(false) }
     DisposableEffect(Unit) {
         app.updateReaderScreenActive(true)
         onDispose { app.updateReaderScreenActive(false) }
     }
 
     LaunchedEffect(bookId) {
-        app.library.book(bookId)?.let(vm::load)
+        val b = app.library.book(bookId) ?: run {
+            // 索引可能正被并发重写，稍等重查一次再判定「已不存在」
+            delay(300)
+            app.library.book(bookId)
+        }
+        if (b == null) bookMissing = true else vm.load(b)
     }
 
     // 后台「全书翻译」进行中时，定期从服务端补拉译文页：
@@ -115,6 +123,23 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
         }
     }
 
+    if (bookMissing) {
+        // 提示后短暂停留再自动返回书库（Toast 兑底，防止导航过快看不到提示）
+        LaunchedEffect(bookId) {
+            Toast.makeText(app, "书已不存在", Toast.LENGTH_SHORT).show()
+            delay(600)
+            onBack()
+        }
+        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            Text(
+                "书已不存在",
+                color = MaterialTheme.colorScheme.onBackground,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.align(Alignment.Center),
+            )
+        }
+        return
+    }
     val book = vm.book ?: return
     val pagerState = rememberPagerState(
         initialPage = vm.currentPage,
@@ -123,7 +148,9 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
 
     val volumeAndRemoteHandler = remember(book, pagerState) {
         RemoteReaderCommandHandler { action ->
-            val target = (vm.currentPage + if (action == RemotePageAction.NEXT) 1 else -1)
+            // 目标页以 pagerState.currentPage 为准：vm.currentPage 在本地滑动后晚一帧才同步，
+            // 用它计算会让 1 帧内到达的远端命令按旧页计算并回跳（03-中8）
+            val target = (pagerState.currentPage + if (action == RemotePageAction.NEXT) 1 else -1)
                 .coerceIn(0, book.pageCount - 1)
             vm.setPage(target)
             app.recordReadingProgress(book, target)
@@ -335,7 +362,7 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                     }
                     Button(
                         onClick = { keepUiAlive(); vm.translateCurrent() },
-                        enabled = status != PageStatus.RUNNING,
+                        enabled = status != PageStatus.RUNNING || vm.translationStale,
                         modifier = Modifier.align(Alignment.CenterEnd),
                     ) {
                         when (status) {

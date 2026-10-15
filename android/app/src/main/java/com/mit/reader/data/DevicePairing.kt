@@ -55,6 +55,8 @@ fun reconcileDiscoveredDevices(
         // 记录里的地址仍在线：无需处理
         if (isDeviceOnline(record.host, record.port)) return@forEach
         candidates.forEach candidate@{ candidate ->
+            // 修复（02-高3）：devid 不匹配的候选一律不发凭据（fail-closed），防冒名设备收集配对凭据
+            if (candidate.devid == null || candidate.devid != record.deviceId) return@candidate
             val status = runCatching { verifyClient.heartbeat(candidate, record.token) }
                 .getOrNull() ?: return@candidate
             if (status.ok) {

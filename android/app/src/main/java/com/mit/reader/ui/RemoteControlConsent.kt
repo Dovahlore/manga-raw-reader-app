@@ -116,6 +116,8 @@ fun RemoteControlConsentHost(app: ReaderApp) {
             }
             RemoteControlUi.acceptedControllerName = null
             pending = null
+            // 修复（03-高2 残留）：会话结束立即收回远端翻页能力，不再依赖下一轮 500ms 压制
+            app.remoteControl.clearReaderInteractionAllowed()
         } else if (name != RemoteControlUi.acceptedControllerName && pending?.controllerName != name) {
             val deniedAt = deniedAtByName[name]
             if (deniedAt != null && System.currentTimeMillis() - deniedAt < DENY_COOLDOWN_MS) {

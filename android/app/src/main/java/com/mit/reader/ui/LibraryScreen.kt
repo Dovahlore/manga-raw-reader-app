@@ -1660,6 +1660,7 @@ private fun BookCell(
     syncTasks: Map<String, SyncTask> = emptyMap(),
     shareTasks: Map<String, SyncTask> = emptyMap(),
 ) {
+    val app = LocalContext.current.applicationContext as ReaderApp
     Column {
         Box(Modifier.fillMaxWidth().aspectRatio(0.72f)) {
             AsyncImage(
@@ -1705,6 +1706,9 @@ private fun BookCell(
                         DropdownMenuItem(text = { Text("移动到文件夹…") }, onClick = { menuOpen = false; onMove() })
                     }
                     DropdownMenuItem(text = { Text("分享/对传") }, onClick = { menuOpen = false; onShare() })
+                    if (shareTasks.containsKey(book.id)) {
+                        DropdownMenuItem(text = { Text("取消发送") }, onClick = { menuOpen = false; app.cancelShare(book.id) })
+                    }
                     DropdownMenuItem(text = { Text("重命名") }, onClick = { menuOpen = false; onRename() })
                     DropdownMenuItem(text = { Text("删除") }, onClick = { menuOpen = false; onDelete() })
                 }
@@ -1947,6 +1951,7 @@ private fun BookRow(
     syncTasks: Map<String, SyncTask> = emptyMap(),
     shareTasks: Map<String, SyncTask> = emptyMap(),
 ) {
+    val app = LocalContext.current.applicationContext as ReaderApp
     Row(
         Modifier.fillMaxWidth().combinedClickable(onClick = onOpen, onLongClick = onLongPress).padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -2010,6 +2015,9 @@ private fun BookRow(
                     DropdownMenuItem(text = { Text("移动到文件夹…") }, onClick = { menuOpen = false; onMove() })
                 }
                 DropdownMenuItem(text = { Text("分享/对传") }, onClick = { menuOpen = false; onShare() })
+                if (shareTasks.containsKey(book.id)) {
+                    DropdownMenuItem(text = { Text("取消发送") }, onClick = { menuOpen = false; app.cancelShare(book.id) })
+                }
                 DropdownMenuItem(text = { Text("重命名") }, onClick = { menuOpen = false; onRename() })
                 DropdownMenuItem(text = { Text("删除") }, onClick = { menuOpen = false; onDelete() })
             }
@@ -2894,17 +2902,21 @@ private fun DeviceManagerTab(
     LaunchedEffect(searching) {
         if (searching) {
             val deadline = System.currentTimeMillis() + 5 * 60_000L
-            discoveredStable.clear()
-            app.startDeviceDiscovery()
-            while (searching && System.currentTimeMillis() < deadline) {
-                delay(1_000)
-                val now = System.currentTimeMillis()
-                discoveredStable.filterValues { now - it.second > 45_000 }
-                    .keys.toList()
-                    .forEach { discoveredStable.remove(it) }
+            try {
+                discoveredStable.clear()
+                app.startDeviceDiscovery()
+                while (searching && System.currentTimeMillis() < deadline) {
+                    delay(1_000)
+                    val now = System.currentTimeMillis()
+                    discoveredStable.filterValues { now - it.second > 45_000 }
+                        .keys.toList()
+                        .forEach { discoveredStable.remove(it) }
+                }
+            } finally {
+                // 修复：离开页面导致协程被取消时也要停发现并释放组播锁，否则泄漏到进程死亡
+                app.stopDeviceDiscovery()
+                searching = false
             }
-            app.stopDeviceDiscovery()
-            searching = false
         }
     }
 
@@ -2942,6 +2954,14 @@ private fun DeviceManagerTab(
         }
         app.localTransferEndpoint()?.let {
             Text("本机地址：$it", style = MaterialTheme.typography.bodyMedium)
+        }
+        app.serverStartError?.let { err ->
+            // 修复：接收服务启动失败不再静默（此前 NSD 照常广播但对端连不上）
+            Text(
+                "传输服务未启动：$err",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
         }
         if (app.nsdDiscoverable) {
             Row(
@@ -3098,7 +3118,8 @@ private fun DeviceManagerTab(
                             // 单侧取消配对：移除本机记录，并掐断双方可能存在的会话；对方旧凭据就此失效
                             app.forgetPairedDevice(device.deviceId)
                             app.disconnectRemoteHostController()
-                            app.disconnectRemoteController()
+                            // 只在被忘记设备正是当前遥控会话对端时才断开连接，避免误伤无关会话
+                            app.disconnectFromIf(device.deviceId)
                             app.showRemoteControllerMessage("已取消与 ${device.name} 的配对；对方需重新输码才能再配对")
                         }) { Text("忘记") }
                     }
