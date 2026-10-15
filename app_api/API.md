@@ -2,7 +2,7 @@
 
 - 基地址：`http://127.0.0.1:8020`
 - **认证（已开启）**：所有 `/v1/*` 请求头必须带 `X-API-Token: <token>`，token = `app.env` 里的 `MIT_API_TOKEN`
-  （当前值 `aFm7-O4B5VD457MKVDNpDK9QFDkjIHbd`）。没带或带错 → **401**。想关掉鉴权就把 `app.env` 里
+  （当前值 `（已轮换，新值见本地 app.env，勿提交明文）`）。没带或带错 → **401**。想关掉鉴权就把 `app.env` 里
   `MIT_API_TOKEN=` 留空并重启 app-api。
 - Swagger（可以直接在浏览器里点着试）：<http://127.0.0.1:8020/docs>（右上角 `Authorize` 填 token）
 - 现成 Collection：`docs/postman/mit-app-api.postman_collection.json` → Postman `Import`，

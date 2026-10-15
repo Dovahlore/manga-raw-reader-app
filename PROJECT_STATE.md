@@ -131,7 +131,7 @@ GET    /v1/cloud/books/{id}/download     # 下云端 zip（book.src + pages + tr
 DELETE /v1/cloud/books/{id}             # 取消同步：删 zip + 记录 + 翻译结果（books 级联）+ 磁盘
 GET    /v1/cloud/folders 、POST /v1/cloud/folders 、DELETE /v1/cloud/folders/{id}
 ```
-- **鉴权已开**：`/v1/*` 都要 `X-API-Token`（= `app.env` 的 `MIT_API_TOKEN`，当前 `aFm7-O4B5VD457MKVDNpDK9QFDkjIHbd`），带错→401；关掉就把 app.env 里留空并重启
+- **鉴权已开**：`/v1/*` 都要 `X-API-Token`（= `app.env` 的 `MIT_API_TOKEN`，当前 `（已轮换，新值见本地 app.env，勿提交明文）`），带错→401；关掉就把 app.env 里留空并重启
 - **保留期**：翻译结果（pages/块/上下文 + 磁盘图片与 L1 缓存）超 `MIT_RETENTION_DAYS`（默认 14 天）自动清理；App 本地有译文缓存。
   **已同步到云端（`cloud_books`）的书豁免 14 天清理**（书 zip 与翻译结果永久保留，取消同步才删）；
   未同步的翻译结果仍按 14 天清理。App 端已同步的书用 `cloudId` 作为服务端 `book_id`（见 `Book.serverId`）
