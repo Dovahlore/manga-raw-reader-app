@@ -15,6 +15,9 @@ object ServerConfig {
     private const val KEY_LIB_FOLDER = "library_folder_uri"
     private const val KEY_LIB_FOLDER_NAME = "library_folder_name"
     private const val KEY_LIBRARY_STORAGE = "library_storage_dir"
+    private const val KEY_TRANSLATOR_MODEL = "translator_model"
+    private const val KEY_TRANSLATOR_BASE_URL = "translator_base_url"
+    private const val KEY_TRANSLATOR_API_KEY = "translator_api_key"
 
     private var prefs: SharedPreferences? = null
 
@@ -34,6 +37,33 @@ object ServerConfig {
         set(value) {
             prefs?.edit()?.putString(KEY_KEY, value.trim())?.apply()
         }
+
+    /** OpenAI 兼容模型名。 */
+    var translatorModel: String
+        get() = prefs?.getString(KEY_TRANSLATOR_MODEL, "")?.trim().orEmpty()
+        set(value) {
+            prefs?.edit()?.putString(KEY_TRANSLATOR_MODEL, value.trim())?.apply()
+        }
+
+    /** OpenAI 兼容 API Base URL；例如 DeepSeek 填 https://api.deepseek.com。 */
+    var translatorBaseUrl: String
+        get() = prefs?.getString(KEY_TRANSLATOR_BASE_URL, "")?.trim().orEmpty()
+        set(value) {
+            prefs?.edit()?.putString(KEY_TRANSLATOR_BASE_URL, value.trim().trimEnd('/'))?.apply()
+        }
+
+    /** OpenAI 兼容 API Key。 */
+    var translatorApiKey: String
+        get() = prefs?.getString(KEY_TRANSLATOR_API_KEY, "")?.trim().orEmpty()
+        set(value) {
+            prefs?.edit()?.putString(KEY_TRANSLATOR_API_KEY, value.trim())?.apply()
+        }
+
+    /** 服务端不保存模型 Key；新翻译必须由手机提供完整模型配置。 */
+    fun isTranslationConfigured(): Boolean =
+        translatorModel.isNotBlank() &&
+            translatorBaseUrl.isNotBlank() &&
+            translatorApiKey.isNotBlank()
 
     /** 书库文件夹（SAF 树 URI，用于自动扫描导入 epub/mobi）。 */
     var libraryFolderUri: String?

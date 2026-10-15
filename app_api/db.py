@@ -217,10 +217,20 @@ def init_schema(retries: int = 30, delay: float = 2.0):
                 if cur.fetchone()["c"] == 0:
                     cur.execute("ALTER TABLE jobs ADD COLUMN book_id VARCHAR(191) NULL")
                 cur.execute(
+                    "SELECT COUNT(*) AS c FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='jobs' AND COLUMN_NAME='target_page_index'")
+                if cur.fetchone()["c"] == 0:
+                    cur.execute("ALTER TABLE jobs ADD COLUMN target_page_index INT NULL")
+                cur.execute(
                     "SELECT COUNT(*) AS c FROM information_schema.STATISTICS "
                     "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='jobs' AND INDEX_NAME='idx_jobs_book'")
                 if cur.fetchone()["c"] == 0:
                     cur.execute("CREATE INDEX idx_jobs_book ON jobs (book_id)")
+                cur.execute(
+                    "SELECT COUNT(*) AS c FROM information_schema.STATISTICS "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='jobs' AND INDEX_NAME='idx_jobs_target_page'")
+                if cur.fetchone()["c"] == 0:
+                    cur.execute("CREATE INDEX idx_jobs_target_page ON jobs (book_id, target_page_index, status)")
                 # 11) 外键补全：jobs.book_id、reading_progress → books（先清孤儿，再建 FK；幂等）
                 #     a. 清孤儿 reading_progress（找不到同 owner+hash 的书）
                 cur.execute(
@@ -253,6 +263,14 @@ def init_schema(retries: int = 30, delay: float = 2.0):
                     "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='books' AND COLUMN_NAME='folder_changed_at'")
                 if cur.fetchone()["c"] == 0:
                     cur.execute("ALTER TABLE books ADD COLUMN folder_changed_at BIGINT NULL")
+                # 13) 书名/阅读模式 LWW 时间戳
+                for column in ("title_changed_at", "mode_changed_at"):
+                    cur.execute(
+                        "SELECT COUNT(*) AS c FROM information_schema.COLUMNS "
+                        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='books' AND COLUMN_NAME=%s",
+                        (column,))
+                    if cur.fetchone()["c"] == 0:
+                        cur.execute(f"ALTER TABLE books ADD COLUMN {column} BIGINT NULL")
             conn.close()
             return len(stmts)
         except Exception as e:      # noqa: BLE001

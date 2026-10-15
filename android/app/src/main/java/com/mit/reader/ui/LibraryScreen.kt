@@ -5,6 +5,14 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -25,7 +33,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items as listItems
 import androidx.compose.foundation.rememberScrollState
@@ -35,6 +45,7 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
@@ -43,12 +54,12 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -57,17 +68,22 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -82,7 +98,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -94,12 +112,18 @@ import com.mit.reader.ReaderApp
 import com.mit.reader.SyncTask
 import com.mit.reader.data.Book
 import com.mit.reader.data.CloudBook
+import com.mit.reader.data.DiscoveredDevice
 import com.mit.reader.data.Folder
+import com.mit.reader.data.PairedDeviceState
+import com.mit.reader.data.reconcileDiscoveredDevices
 import com.mit.reader.data.ReadingMode
 import com.mit.reader.data.ReadingProgress
 import com.mit.reader.data.ServerBook
 import com.mit.reader.data.serverId
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
 
@@ -134,6 +158,47 @@ private val CloudVector: ImageVector by lazy {
             horizontalLineTo(19f)
             curveTo(20.66f, 12f, 22f, 13.34f, 22f, 15f)
             reflectiveCurveTo(20.66f, 18f, 19f, 18f)
+            close()
+        }
+    }.build()
+}
+
+private val RemoteControlVector: ImageVector by lazy {
+    ImageVector.Builder(
+        name = "RemoteControl",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f,
+    ).apply {
+        path(fill = SolidColor(Color.Black)) {
+            moveTo(8.75f, 2f)
+            horizontalLineToRelative(6.5f)
+            curveToRelative(1.519f, 0f, 2.75f, 1.231f, 2.75f, 2.75f)
+            verticalLineToRelative(14.5f)
+            curveToRelative(0f, 1.519f, -1.231f, 2.75f, -2.75f, 2.75f)
+            horizontalLineToRelative(-6.5f)
+            curveToRelative(-1.519f, 0f, -2.75f, -1.231f, -2.75f, -2.75f)
+            verticalLineToRelative(-14.5f)
+            curveToRelative(0f, -1.519f, 1.231f, -2.75f, 2.75f, -2.75f)
+            close()
+            moveTo(10.2f, 5.5f)
+            curveToRelative(0.718f, 0f, 1.3f, 0.582f, 1.3f, 1.3f)
+            curveToRelative(0f, 0.718f, -0.582f, 1.3f, -1.3f, 1.3f)
+            curveToRelative(-0.718f, 0f, -1.3f, -0.582f, -1.3f, -1.3f)
+            curveToRelative(0f, -0.718f, 0.582f, -1.3f, 1.3f, -1.3f)
+            close()
+            moveTo(13.8f, 5.5f)
+            curveToRelative(0.718f, 0f, 1.3f, 0.582f, 1.3f, 1.3f)
+            curveToRelative(0f, 0.718f, -0.582f, 1.3f, -1.3f, 1.3f)
+            curveToRelative(-0.718f, 0f, -1.3f, -0.582f, -1.3f, -1.3f)
+            curveToRelative(0f, -0.718f, 0.582f, -1.3f, 1.3f, -1.3f)
+            close()
+            moveTo(12f, 15.4f)
+            curveToRelative(1.878f, 0f, 3.4f, 1.078f, 3.4f, 2.408f)
+            curveToRelative(0f, 1.33f, -1.522f, 2.408f, -3.4f, 2.408f)
+            curveToRelative(-1.878f, 0f, -3.4f, -1.078f, -3.4f, -2.408f)
+            curveToRelative(0f, -1.33f, 1.522f, -2.408f, 3.4f, -2.408f)
             close()
         }
     }.build()
@@ -252,20 +317,25 @@ private fun Book.matchesCloud(cb: CloudBook): Boolean =
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LibraryScreen(onOpen: (String) -> Unit, onSettings: () -> Unit, onKmoe: () -> Unit) {
+fun LibraryScreen(
+    onOpen: (String) -> Unit,
+    onSettings: () -> Unit,
+    onKmoe: () -> Unit,
+    onRemoteControl: () -> Unit,
+) {
     val context = LocalContext.current
     val app = context.applicationContext as ReaderApp
     val activity = context.findActivity()
     val books = app.libraryBooks
     val folders = app.libraryFolders
     var refreshing by remember { mutableStateOf(0) }
-    var currentFolderId by remember { mutableStateOf<String?>(null) }
+    var currentFolderId by rememberSaveable { mutableStateOf<String?>(null) }
     var tab by remember { mutableIntStateOf(0) }
     var libraryFilter by remember { mutableStateOf(LibraryFilter.ALL) }
     var filterMenuOpen by remember { mutableStateOf(false) }
-    var cloudBooks by remember { mutableStateOf<List<CloudBook>>(emptyList()) }
+    var cloudBooks by remember { mutableStateOf(app.cachedCloudBooks) }
     var cloudErr by remember { mutableStateOf<String?>(null) }
-    var serverBooks by remember { mutableStateOf<List<ServerBook>>(emptyList()) }
+    var serverBooks by remember { mutableStateOf(app.cachedServerBooks) }
     var progressErr by remember { mutableStateOf<String?>(null) }
     var gridMode by remember { mutableStateOf(true) }
     var sortMode by remember { mutableStateOf(SortMode.NAME) }
@@ -321,11 +391,18 @@ fun LibraryScreen(onOpen: (String) -> Unit, onSettings: () -> Unit, onKmoe: () -
         runCatching { app.api.cloudList() }
             .onSuccess {
                 if (cloudBooks != it) cloudBooks = it
+                app.updateCachedCloudBooks(it)
                 cloudErr = null
                 // 云端收藏夹拉到本地（并集补建）：下载云端书才能落进对应收藏夹；本地新建的夹也推上云
                 app.syncCloudFolders()
             }
-            .onFailure { cloudErr = it.message }
+            .onFailure {
+                cloudErr = if (app.cloudSnapshotSavedAt > 0L) {
+                    "离线：显示上次在线同步的云端书"
+                } else {
+                    it.message
+                }
+            }
     }
 
     // 书库卡片和进度页共用真实服务端 job 状态；全局串行 worker 中只能一本 running。
@@ -334,6 +411,7 @@ fun LibraryScreen(onOpen: (String) -> Unit, onSettings: () -> Unit, onKmoe: () -
             runCatching { app.api.listBooks() }
                 .onSuccess {
                     if (serverBooks != it) serverBooks = it
+                    app.updateCachedServerBooks(it)
                     progressErr = null
                 }
                 .onFailure { progressErr = it.message }
@@ -421,6 +499,7 @@ fun LibraryScreen(onOpen: (String) -> Unit, onSettings: () -> Unit, onKmoe: () -
                     } else {
                         val titleText = when {
                             tab == 1 -> "进度"
+                            tab == 2 -> "设备"
                             currentFolderId != null -> {
                                 val folder = folders.find { it.id == currentFolderId }
                                 if (folder != null) {
@@ -452,7 +531,7 @@ fun LibraryScreen(onOpen: (String) -> Unit, onSettings: () -> Unit, onKmoe: () -
                         searchActive -> IconButton(onClick = { searchActive = false; searchQuery = "" }) {
                             Icon(Icons.Default.ArrowBack, contentDescription = "退出搜索")
                         }
-                        tab == 1 -> Unit   // 进度是全局视图，不显示文件夹返回箭头
+                        tab != 0 -> Unit   // 进度/设备是全局视图，不显示文件夹返回箭头
                         currentFolderId != null -> IconButton(onClick = { currentFolderId = null }) {
                             Icon(Icons.Default.ArrowBack, contentDescription = "返回")
                         }
@@ -520,28 +599,9 @@ fun LibraryScreen(onOpen: (String) -> Unit, onSettings: () -> Unit, onKmoe: () -
                 },
             )
         },
-        floatingActionButton = {
-            if (tab == 0) {
-                var importMenuOpen by remember { mutableStateOf(false) }
-                Box {
-                    FloatingActionButton(onClick = { importMenuOpen = true }) {
-                        Icon(Icons.Default.Add, contentDescription = "导入")
-                    }
-                    DropdownMenu(expanded = importMenuOpen, onDismissRequest = { importMenuOpen = false }) {
-                        DropdownMenuItem(
-                            text = { Text("导入文件（EPUB / MOBI / 压缩包）") },
-                            onClick = { importMenuOpen = false; importLauncher.launch(arrayOf("*/*")) },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("导入文件夹（单层纯图片）") },
-                            onClick = { importMenuOpen = false; importFolderLauncher.launch(null) },
-                        )
-                    }
-                }
-            }
-        },
     ) { pad ->
-        Column(Modifier.fillMaxSize().padding(pad)) {
+        Box(Modifier.fillMaxSize().padding(pad)) {
+            Column(Modifier.fillMaxSize()) {
             GlobalTaskBanner(app)
             app.incomingTransfer?.let { inc ->
                 Surface(
@@ -580,66 +640,115 @@ fun LibraryScreen(onOpen: (String) -> Unit, onSettings: () -> Unit, onKmoe: () -
                     downloadingCloudIds = app.syncTasks.keys.toSet(),
                 )
             } else {
-                TabRow(selectedTabIndex = tab) {
-                    Box(modifier = Modifier.fillMaxWidth()) {
+                // 动态 tab：选中的 tab 更宽（0.42 : 0.29 : 0.29），宽度与指示条都带切换动画；
+                // 不在书库 tab 时收起「全部/云端/本地」筛选与下拉小三角。
+                BoxWithConstraints {
+                    val wideTabWidth by animateDpAsState(
+                        targetValue = maxWidth * 0.42f,
+                        animationSpec = tween(250, easing = FastOutSlowInEasing),
+                        label = "tabWidthWide",
+                    )
+                    val slimTabWidth by animateDpAsState(
+                        targetValue = maxWidth * 0.29f,
+                        animationSpec = tween(250, easing = FastOutSlowInEasing),
+                        label = "tabWidthSlim",
+                    )
+                    TabRow(
+                        selectedTabIndex = tab,
+                        indicator = { positions ->
+                            val pos = positions[tab]
+                            val indicatorLeft by animateDpAsState(
+                                pos.left, tween(250, easing = FastOutSlowInEasing), label = "tabIndicatorLeft",
+                            )
+                            val indicatorWidth by animateDpAsState(
+                                pos.width, tween(250, easing = FastOutSlowInEasing), label = "tabIndicatorWidth",
+                            )
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .wrapContentSize(Alignment.BottomStart)
+                                    .offset(x = indicatorLeft)
+                                    .size(width = indicatorWidth, height = 3.dp)
+                                    .clip(RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp))
+                                    .background(MaterialTheme.colorScheme.primary),
+                            )
+                        },
+                    ) {
                         Tab(
                             selected = tab == 0,
                             onClick = { tab = 0; filterMenuOpen = false },
-                            text = { Text("书库 · ${libraryFilter.label}") },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.CenterEnd)
-                                .padding(end = 8.dp)
-                                .size(40.dp)
-                                .clip(CircleShape)
-                                .clickable {
-                                    tab = 0
-                                    filterMenuOpen = true
-                                },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                "▾",
-                                color = MaterialTheme.colorScheme.primary,
-                                style = MaterialTheme.typography.titleMedium,
-                            )
-                            DropdownMenu(
-                                expanded = filterMenuOpen,
-                                onDismissRequest = { filterMenuOpen = false },
-                            ) {
-                                LibraryFilter.entries.forEach { filter ->
-                                    DropdownMenuItem(
-                                        text = {
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                verticalAlignment = Alignment.CenterVertically,
+                            text = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text("书库")
+                                    // 只在书库 tab 展开当前筛选与下拉三角（切走时收起）
+                                    AnimatedVisibility(
+                                        visible = tab == 0,
+                                        enter = expandHorizontally() + fadeIn(),
+                                        exit = shrinkHorizontally() + fadeOut(),
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(" · ${libraryFilter.label}", maxLines = 1, softWrap = false)
+                                            Box(
+                                                modifier = Modifier
+                                                    .padding(start = 2.dp)
+                                                    .size(26.dp)
+                                                    .clip(CircleShape)
+                                                    .clickable { filterMenuOpen = true },
+                                                contentAlignment = Alignment.Center,
                                             ) {
-                                                Text(filter.label, modifier = Modifier.weight(1f))
-                                                if (libraryFilter == filter) {
-                                                    Icon(
-                                                        Icons.Default.Check,
-                                                        contentDescription = null,
-                                                        modifier = Modifier.size(18.dp),
-                                                    )
+                                                Text(
+                                                    "▾",
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                    style = MaterialTheme.typography.titleMedium,
+                                                )
+                                                DropdownMenu(
+                                                    expanded = filterMenuOpen,
+                                                    onDismissRequest = { filterMenuOpen = false },
+                                                ) {
+                                                    LibraryFilter.entries.forEach { filter ->
+                                                        DropdownMenuItem(
+                                                            text = {
+                                                                Row(
+                                                                    modifier = Modifier.fillMaxWidth(),
+                                                                    verticalAlignment = Alignment.CenterVertically,
+                                                                ) {
+                                                                    Text(filter.label, modifier = Modifier.weight(1f))
+                                                                    if (libraryFilter == filter) {
+                                                                        Icon(
+                                                                            Icons.Default.Check,
+                                                                            contentDescription = null,
+                                                                            modifier = Modifier.size(18.dp),
+                                                                        )
+                                                                    }
+                                                                }
+                                                            },
+                                                            onClick = {
+                                                                libraryFilter = filter
+                                                                filterMenuOpen = false
+                                                            },
+                                                        )
+                                                    }
                                                 }
                                             }
-                                        },
-                                        onClick = {
-                                            libraryFilter = filter
-                                            filterMenuOpen = false
-                                        },
-                                    )
+                                        }
+                                    }
                                 }
-                            }
-                        }
+                            },
+                            modifier = Modifier.width(if (tab == 0) wideTabWidth else slimTabWidth),
+                        )
+                        Tab(
+                            selected = tab == 1,
+                            onClick = { tab = 1; filterMenuOpen = false; viewMenuOpen = false },
+                            text = { Text("进度") },
+                            modifier = Modifier.width(if (tab == 1) wideTabWidth else slimTabWidth),
+                        )
+                        Tab(
+                            selected = tab == 2,
+                            onClick = { tab = 2; filterMenuOpen = false; viewMenuOpen = false },
+                            text = { Text("设备") },
+                            modifier = Modifier.width(if (tab == 2) wideTabWidth else slimTabWidth),
+                        )
                     }
-                    Tab(
-                        selected = tab == 1,
-                        onClick = { tab = 1; filterMenuOpen = false; viewMenuOpen = false },
-                        text = { Text("进度") },
-                    )
                 }
                 if (tab == 1) {
                     ProgressList(
@@ -653,6 +762,11 @@ fun LibraryScreen(onOpen: (String) -> Unit, onSettings: () -> Unit, onKmoe: () -
                         progressHistory = app.progressHistory,
                         onStop = { app.stopTranslatingIf(it.id) },
                         onStopCloud = { doStopCloud(it) },
+                    )
+                } else if (tab == 2) {
+                    DeviceManagerTab(
+                        app = app,
+                        onRemoteControl = onRemoteControl,
                     )
                 } else {
                     // 本地书与云端书按「内容 hash」互认（cloudId 现在也等于 hash，但以 hash 为准，避免陈旧 cloudId 对不上）
@@ -722,6 +836,70 @@ fun LibraryScreen(onOpen: (String) -> Unit, onSettings: () -> Unit, onKmoe: () -
                         shareTasks = app.shareTasks,
                         gridMode = gridMode,
                     )
+                }
+            }
+        }
+
+            if (tab == 0) {
+                // 底部左右两枚同款按钮：左=遥控器，右=导入（同为 48dp 圆形 + secondaryContainer，
+                // 距左右/底部边距一致，连接状态只影响遥控器按钮配色，不影响两侧对称）。
+                var importMenuOpen by remember { mutableStateOf(false) }
+                IconButton(
+                    onClick = onRemoteControl,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 16.dp, bottom = 16.dp)
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (app.remoteControllerConnection != null) {
+                                MaterialTheme.colorScheme.primaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.96f)
+                            }
+                        ),
+                ) {
+                    Icon(
+                        RemoteControlVector,
+                        contentDescription = "遥控器",
+                        tint = if (app.remoteControllerConnection != null) {
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.onSecondaryContainer
+                        },
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
+                // 右下角：导入按钮，样式与左侧遥控器按钮完全一致（48dp 圆形 + secondaryContainer）
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 16.dp, bottom = 16.dp),
+                ) {
+                    IconButton(
+                        onClick = { importMenuOpen = true },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.96f)),
+                    ) {
+                        Icon(
+                            Icons.Default.Add,
+                            contentDescription = "导入",
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    }
+                    DropdownMenu(expanded = importMenuOpen, onDismissRequest = { importMenuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("导入文件（EPUB / MOBI / 压缩包）") },
+                            onClick = { importMenuOpen = false; importLauncher.launch(arrayOf("*/*")) },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("导入文件夹（单层纯图片）") },
+                            onClick = { importMenuOpen = false; importFolderLauncher.launch(null) },
+                        )
+                    }
                 }
             }
         }
@@ -845,43 +1023,70 @@ fun LibraryScreen(onOpen: (String) -> Unit, onSettings: () -> Unit, onKmoe: () -
         )
     }
 
-    // ---- 分享/对传：选择接收设备 ----
+    // ---- 分享/对传：发送给已配对设备（在线才可点；顺带把换了 IP 的已配对设备地址刷新回来）----
     shareTarget?.let { book ->
-        val devices = app.transferDevices
-        val discovering = app.transferDiscovering
+        val deviceStates = rememberPairedDeviceStates(app)
+        LaunchedEffect(app.transferDevices, app.pairedDevices) {
+            val updates = withContext(Dispatchers.IO) {
+                reconcileDiscoveredDevices(app.pairedDevices, app.transferDevices)
+            }
+            updates.forEach(app::upsertPairedDevice)
+        }
         AlertDialog(
             onDismissRequest = { shareTarget = null; app.stopDeviceDiscovery() },
             title = { Text("分享《${book.title}》") },
             text = {
                 Column {
                     Text(
-                        "选择接收设备（两台设备需连同一个 WiFi）。对方 App 打开即自动接收。",
+                        "选择已配对设备发送（两台设备需连同一个 WiFi，且对方已打开本 App）。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(8.dp))
-                    if (devices.isEmpty()) {
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 8.dp)) {
-                            if (discovering) {
-                                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                            }
-                            Text(
-                                if (discovering) " 正在搜索附近设备…" else " 未发现设备，请确认对方已打开本 App",
-                                modifier = Modifier.padding(start = 8.dp),
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
+                    if (app.pairedDevices.isEmpty()) {
+                        Text(
+                            "暂无已配对设备。请先在「书库 · 设备」页完成配对。",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     } else {
-                        devices.forEach { d ->
+                        app.pairedDevices.forEach { d ->
+                            val state = deviceStates[d.deviceId]
+                            val online = state == PairedDeviceState.ONLINE
                             Row(
-                                Modifier.fillMaxWidth().clickable {
+                                Modifier.fillMaxWidth().clickable(enabled = online) {
                                     shareTarget = null
                                     app.stopDeviceDiscovery()
-                                    app.shareBook(book, d)
+                                    app.shareBook(book, DiscoveredDevice(d.name, d.host, d.port))
                                 }.padding(vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Text(d.name, modifier = Modifier.weight(1f))
+                                Column(Modifier.weight(1f)) {
+                                    Text(d.name)
+                                    Text(
+                                        "${d.host}:${d.port}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Box(
+                                    Modifier.size(10.dp).clip(CircleShape).background(
+                                        when (state) {
+                                            PairedDeviceState.ONLINE -> Color(0xFF43A047)
+                                            else -> Color(0xFF9E9E9E)
+                                        }
+                                    ),
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    when (state) {
+                                        PairedDeviceState.ONLINE -> "在线"
+                                        PairedDeviceState.OFFLINE -> "离线"
+                                        null -> "检测中…"
+                                    },
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (online) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
                             }
                         }
                     }
@@ -1630,7 +1835,7 @@ private fun CloudTranslationProgress(state: CloudTranslationState?) {
     }
 }
 
-/** 仅云端书卡片：不可打开阅读，只能「下载到本地」或「删除云端」；封面从服务端拉取并缓存。 */
+/** 仅云端书卡片：点击即下载到本地；下载完成后再从书库打开阅读。 */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun CloudCell(
@@ -1656,7 +1861,7 @@ private fun CloudCell(
             Modifier.fillMaxWidth().aspectRatio(0.72f)
                 .clip(MaterialTheme.shapes.small)
                 .background(MaterialTheme.colorScheme.surfaceVariant)
-                .combinedClickable(onClick = {}, onLongClick = onMove)
+                .combinedClickable(onClick = onDownload, onLongClick = onMove)
         ) {
             if (coverReady && coverFile.exists()) {
                 AsyncImage(
@@ -1830,7 +2035,12 @@ private fun CloudRow(
     val coverFile = app.library.cloudCoverFile(cloud.id)
     val translationActive = translation?.active == true
     val translationCompleted = (translation?.total ?: 0) > 0 && (translation?.done ?: 0) >= (translation?.total ?: 0)
-    Row(Modifier.fillMaxWidth().combinedClickable(onClick = {}, onLongClick = onMove).padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        Modifier.fillMaxWidth()
+            .combinedClickable(onClick = onDownload, onLongClick = onMove)
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Box(
             Modifier.size(width = 40.dp, height = 56.dp).clip(MaterialTheme.shapes.small)
                 .background(MaterialTheme.colorScheme.surfaceVariant),
@@ -1984,7 +2194,10 @@ private fun CreateFolderDialog(onCreate: (String) -> Unit, onDismiss: () -> Unit
             )
         },
         confirmButton = {
-            TextButton(onClick = { onCreate(name) }) { Text("创建") }
+            TextButton(
+                onClick = { onCreate(name) },
+                enabled = name.trim().length in 1..80,
+            ) { Text("创建") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
@@ -2031,7 +2244,10 @@ private fun RenameFolderDialog(
             )
         },
         confirmButton = {
-            TextButton(onClick = { onRename(name) }) { Text("确定") }
+            TextButton(
+                onClick = { onRename(name) },
+                enabled = name.trim().length in 1..80,
+            ) { Text("确定") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
@@ -2057,7 +2273,10 @@ private fun RenameBookDialog(
             )
         },
         confirmButton = {
-            TextButton(onClick = { onRename(name) }) { Text("确定") }
+            TextButton(
+                onClick = { onRename(name) },
+                enabled = name.isNotBlank(),
+            ) { Text("确定") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
@@ -2652,4 +2871,326 @@ private fun ContinueReadingCard(book: Book, page: Int, onContinue: () -> Unit) {
             }
         }
     }
+}
+
+@Composable
+private fun DeviceManagerTab(
+    app: ReaderApp,
+    onRemoteControl: () -> Unit,
+) {
+    var manualAddress by remember { mutableStateOf("") }
+    var pairTarget by remember { mutableStateOf<DiscoveredDevice?>(null) }
+    val deviceStates = rememberPairedDeviceStates(app)
+
+    // 搜索按钮驱动：一次持续发现 5 分钟，到点自动停止。NSD 是事件驱动的，新设备上线会自己出现；
+    // 不再每 5 秒重启发现——重启会清空列表，那正是列表闪烁的根源。
+    var searching by remember { mutableStateOf(false) }
+    // 稳定化的发现列表：NSD 的清空/lost 事件不让条目立刻消失，45 秒没再见才移除
+    val discoveredStable = remember { mutableStateMapOf<String, Pair<DiscoveredDevice, Long>>() }
+    LaunchedEffect(app.transferDevices) {
+        val now = System.currentTimeMillis()
+        app.transferDevices.forEach { d -> discoveredStable[d.name] = d to now }
+    }
+    LaunchedEffect(searching) {
+        if (searching) {
+            val deadline = System.currentTimeMillis() + 5 * 60_000L
+            discoveredStable.clear()
+            app.startDeviceDiscovery()
+            while (searching && System.currentTimeMillis() < deadline) {
+                delay(1_000)
+                val now = System.currentTimeMillis()
+                discoveredStable.filterValues { now - it.second > 45_000 }
+                    .keys.toList()
+                    .forEach { discoveredStable.remove(it) }
+            }
+            app.stopDeviceDiscovery()
+            searching = false
+        }
+    }
+
+    // 附近发现与已配对记录对齐：记录认的是对方的设备 ID，对方换 IP 后凭配对凭据自动认回并更新地址
+    LaunchedEffect(app.transferDevices, app.pairedDevices) {
+        val updates = withContext(Dispatchers.IO) {
+            reconcileDiscoveredDevices(app.pairedDevices, app.transferDevices)
+        }
+        updates.forEach(app::upsertPairedDevice)
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        // ---- 配对：被发现开关 + 配对码 + 搜索（同一套配对逻辑）----
+        Text("配对", style = MaterialTheme.typography.titleMedium)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("允许被附近设备发现", modifier = Modifier.weight(1f))
+            Switch(
+                checked = app.nsdDiscoverable,
+                onCheckedChange = { enabled ->
+                    app.setDeviceDiscoverable(enabled)
+                    // 配对码不常驻：打开被发现才生成随机码，关闭即隐藏
+                    if (enabled) app.refreshRemotePairingCode()
+                },
+            )
+        }
+        app.localTransferEndpoint()?.let {
+            Text("本机地址：$it", style = MaterialTheme.typography.bodyMedium)
+        }
+        if (app.nsdDiscoverable) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("本机配对码", modifier = Modifier.weight(1f))
+                Text(
+                    app.remoteControl.pairingCode.ifBlank { "······" },
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+        RemoteControlUi.acceptedControllerName?.let { name ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("正在被「$name」遥控", modifier = Modifier.weight(1f))
+                TextButton(onClick = app::disconnectRemoteHostController) { Text("断开") }
+            }
+        }
+
+        // ---- 搜索并配对新设备（紧挨配对码，同属配对流程）----
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Button(onClick = { searching = !searching }) {
+                Text(if (searching) "停止搜索" else "搜索附近设备")
+            }
+            if (searching) {
+                // 搜索是一种持续状态：转圈直到停止；后台每 5 秒重启广播是内部动作，不影响这个状态
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                Text("正在搜索附近设备…（5 分钟后自动停止）", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        discoveredStable.values
+            .map { it.first }
+            .sortedBy { it.name }
+            .forEach { device ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = !app.remoteControllerBusy) { pairTarget = device }
+                    .padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(device.name, style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "${device.host}:${device.port}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text(
+                    "配对 ›",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            }
+        // NSD 搜不到时的兑底：手动输入对方地址，同样走配对码弹窗
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedTextField(
+                value = manualAddress,
+                onValueChange = { manualAddress = it },
+                label = { Text("IP:端口（搜索不到时用）") },
+                singleLine = true,
+                modifier = Modifier.weight(1f),
+            )
+            Button(
+                enabled = manualAddress.isNotBlank() && !app.remoteControllerBusy,
+                onClick = {
+                    val device = app.parseManualDevice(manualAddress)
+                    if (device == null) {
+                        app.showRemoteControllerMessage("地址格式应为 IP:端口")
+                    } else {
+                        pairTarget = device
+                    }
+                },
+            ) { Text("手动配对") }
+        }
+
+        HorizontalDivider()
+
+        // ---- 已配对设备：在线点击即连接（连接后可遥控、可对其分享）----
+        Text("已配对设备", style = MaterialTheme.typography.titleMedium)
+        if (app.pairedDevices.isEmpty()) {
+            Text(
+                "暂无已配对设备",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            app.pairedDevices.forEach { device ->
+                val state = deviceStates[device.deviceId]
+                val online = state == PairedDeviceState.ONLINE
+                Surface(
+                    onClick = {
+                        app.prepareRemoteConnect(device.deviceId)
+                        onRemoteControl()
+                    },
+                    enabled = online && !app.remoteControllerBusy,
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(device.name, style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                "${device.host}:${device.port}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            if (device.lastConnectedAt > 0L) {
+                                Text(
+                                    "最近连接：" + java.text.SimpleDateFormat(
+                                        "yyyy-MM-dd HH:mm", java.util.Locale.CHINA,
+                                    ).format(java.util.Date(device.lastConnectedAt)),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        Box(
+                            Modifier.size(10.dp).clip(CircleShape).background(
+                                if (online) Color(0xFF43A047) else Color(0xFF9E9E9E)
+                            ),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            if (online) "在线" else if (state == null) "检测中…" else "离线",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (online) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(end = 4.dp),
+                        )
+                        if (app.remoteControllerBusy) {
+                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        }
+                        TextButton(onClick = {
+                            // 单侧取消配对：移除本机记录，并掐断双方可能存在的会话；对方旧凭据就此失效
+                            app.forgetPairedDevice(device.deviceId)
+                            app.disconnectRemoteHostController()
+                            app.disconnectRemoteController()
+                            app.showRemoteControllerMessage("已取消与 ${device.name} 的配对；对方需重新输码才能再配对")
+                        }) { Text("忘记") }
+                    }
+                }
+            }
+        }
+
+        if (app.remoteControllerMessage.isNotBlank()) {
+            Text(app.remoteControllerMessage, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+
+    pairTarget?.let { target ->
+        PairCodeDialog(device = target, app = app, onDismiss = { pairTarget = null })
+    }
+}
+
+/**
+ * 配对码弹窗：点击搜到/手动的设备后输入对方 6 位配对码。
+ * 配对就是配对（纯凭据交换），不存在「配对连接」：成功后不进入任何遥控会话，仅保存对方凭据，
+ * 该设备随即进入「已配对设备」列表（含在线/离线状态）——分享可直接用，遥控需在列表单独发起。
+ * （实现细节：服务端 pair 会临时登记会话槽，成功回调里立即清掉，避免出现幽灵会话。）
+ */
+@Composable
+private fun PairCodeDialog(
+    device: DiscoveredDevice,
+    app: ReaderApp,
+    onDismiss: () -> Unit,
+) {
+    var code by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        title = { Text("配对「${device.name}」") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "请输入对方设备页显示的 6 位配对码",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = code,
+                    onValueChange = { if (it.length <= 6) code = it.filter(Char::isDigit) },
+                    label = { Text("对方的配对码") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                error?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = code.length == 6 && !busy,
+                onClick = {
+                    busy = true
+                    error = null
+                    app.pairRemoteController(device, code)
+                    scope.launch {
+                        var waited = 0
+                        while (app.remoteControllerConnection == null && waited < 10_000) {
+                            // 对方拒绝/码错时 pairRemoteController 会提前复位 busy：快速失败，不让用户白等
+                            if (waited > 500 && !app.remoteControllerBusy) break
+                            delay(200)
+                            waited += 200
+                        }
+                        if (app.remoteControllerConnection != null) {
+                            app.disconnectRemoteController()
+                            app.showRemoteControllerMessage("已配对 ${device.name}；在已配对列表点击设备即可发起遥控")
+                            onDismiss()
+                        } else {
+                            error = app.remoteControllerMessage.ifBlank { "配对失败，请确认配对码与对方状态" }
+                            busy = false
+                        }
+                    }
+                },
+            ) {
+                if (busy) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                } else {
+                    Text("配对")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(enabled = !busy, onClick = onDismiss) { Text("取消") }
+        },
+    )
 }

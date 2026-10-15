@@ -3,7 +3,10 @@ package com.mit.reader.data
 import java.io.File
 
 /** 设备对传：NSD 服务类型（同一局域网内发现「接收方」用）。 */
-const val SERVICE_TYPE = "_mitreader._tcp"
+const val SERVICE_TYPE = "_mitreader._tcp."
+
+/** NSD 广播/发现时携带本机设备 ID 的键，发现方用它过滤掉自己。 */
+const val NSD_KEY_DEVICE_ID = "devid"
 
 /** 一个待传文件（relPath 形如 pages/page-0001.jpg / translated/003.webp）。 */
 data class TransferFileEntry(
@@ -32,6 +35,22 @@ data class DiscoveredDevice(
     val name: String,
     val host: String,
     val port: Int,
+)
+
+/** 已配对设备：配对一次后，遥控和局域网传书共用这个授权。 */
+data class PairedDevice(
+    val deviceId: String,
+    val name: String,
+    val host: String,
+    val port: Int,
+    val token: String,
+    val lastConnectedAt: Long,
+)
+
+data class RemotePairResult(
+    val token: String,
+    val hostDeviceId: String,
+    val hostName: String,
 )
 
 /** 对端已有这本书（按内容 hash），分享被拦截。 */

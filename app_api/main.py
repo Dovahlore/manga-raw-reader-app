@@ -294,8 +294,11 @@ def deep_merge(base: dict, override: dict) -> dict:
 
 
 def pipeline_hash(cfg: dict) -> str:
-    """缓存键的一部分：只含影响管线结果的配置，不含 context_text（软输入）。"""
+    """缓存键的一部分：不含上下文和请求级 API Key。"""
     c = {k: v for k, v in cfg.items() if k not in S.CACHE_IGNORED_KEYS}
+    translator = c.get("translator")
+    if isinstance(translator, dict):
+        c["translator"] = {k: v for k, v in translator.items() if k != "api_key"}
     return hashlib.sha1(json.dumps(c, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -304,36 +307,69 @@ def sha1_bytes(b: bytes) -> str:
 
 
 def build_context_text(items: List[Dict[str, str]]) -> str:
-    """把若干页的译文拼成引擎认识的上下文格式（与 _build_prev_context 一致）。
-
-    items 按时间从早到晚；正式格式：
-        Here are the previous translation results for reference:
-        <|1|>句子
-        <|2|>句子
-    """
-    lines: List[str] = []
-    for it in items or []:
+    """按页分组拼接历史译文，避免多页文字被模型当成一页混乱上下文。"""
+    sections: List[str] = []
+    for ordinal, it in enumerate(items or [], start=1):
         text = (it.get("dst") or it.get("src") or "").strip()
-        for ln in text.splitlines():
-            ln = ln.strip()
-            if ln:
-                lines.append(ln)
-    if not lines:
+        page_lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if not page_lines:
+            continue
+        page_index = it.get("page_index")
+        page_label = f"page_index={page_index}" if page_index is not None else f"ordinal={ordinal}"
+        sections.append(f"[Previous page | {page_label}]\n" + "\n".join(f"- {ln}" for ln in page_lines))
+    if not sections:
         return ""
-    numbered = [f"<|{i + 1}|>{s}" for i, s in enumerate(lines)]
-    return "Here are the previous translation results for reference:\n" + "\n".join(numbered)
+    return (
+        "Here are previous-page translation results for reference. "
+        "Each [Previous page] block is one separate page; keep pages and lines separate and do not merge them:\n\n"
+        + "\n\n".join(sections)
+    )
 
 
 def book_context_from_db(book_id: str, page_index: int, pages: int) -> str:
     if pages <= 0:
         return ""
     rows = db.query(
-        "SELECT dst_text FROM page_context WHERE book_id=%s AND page_index<%s "
+        "SELECT page_index, dst_text FROM page_context WHERE book_id=%s AND page_index<%s "
         "ORDER BY page_index DESC LIMIT %s",
         (book_id, page_index, pages),
     )
-    items = [{"dst": r["dst_text"]} for r in reversed(rows)]
+    items = [{"page_index": r["page_index"], "dst": r["dst_text"]} for r in reversed(rows)]
     return build_context_text(items)
+
+
+def public_config(cfg: dict) -> dict:
+    """去掉请求级模型 API Key，避免写入任务表、缓存 JSON 或接口返回。"""
+    public = copy.deepcopy(cfg)
+    public.pop("context_text", None)
+    translator = public.get("translator")
+    if isinstance(translator, dict) and translator.get("api_key"):
+        translator["api_key"] = ""
+    return public
+
+
+def _require_client_translator_config(cfg: dict) -> None:
+    translator = cfg.get("translator")
+    if not isinstance(translator, dict):
+        raise HTTPException(400, detail="请在 App 设置中保存模型名、Base URL 和模型 API Key")
+    required = (
+        translator.get("translator") == "custom_openai",
+        str(translator.get("model") or "").strip(),
+        str(translator.get("api_base") or "").strip(),
+        str(translator.get("api_key") or "").strip(),
+    )
+    if not all(required):
+        raise HTTPException(400, detail="请在 App 设置中保存模型名、Base URL 和模型 API Key")
+
+
+def _is_fatal_translator_error(error: Exception) -> bool:
+    message = str(error).lower()
+    markers = (
+        "invalid_request_error", "model names", "authentication", "api key",
+        "unauthorized", "insufficient", "balance", "quota", "billing",
+        "permission denied", "connection error", "name or service not known",
+    )
+    return any(marker in message for marker in markers)
 
 
 def get_book_lock(book_id: str) -> asyncio.Lock:
@@ -758,10 +794,6 @@ async def translate_page(
     后台跑管线，App 用 GET /v1/jobs/{job_id} 看进度（done 后带 page_id）。
     """
     t0 = time.time()
-    raw = await image.read()
-    if not raw:
-        raise HTTPException(400, detail="empty image")
-
     overrides: Dict[str, Any] = {}
     if config:
         try:
@@ -769,6 +801,11 @@ async def translate_page(
         except json.JSONDecodeError as e:
             raise HTTPException(400, detail=f"config 不是合法 JSON: {e}")
     cfg = deep_merge(S.DEFAULT_CONFIG, overrides)
+    _require_client_translator_config(cfg)
+
+    raw = await image.read()
+    if not raw:
+        raise HTTPException(400, detail="empty image")
 
     # ---- 上下文：App 传的优先；否则用数据库里同一本书的历史 ----
     ctx_items = None
@@ -779,6 +816,15 @@ async def translate_page(
             raise HTTPException(400, detail=f"context 不是合法 JSON: {e}")
     if book_id:
         await _ensure_book_owner(book_id, owner)
+        if page_index is not None and async_mode:
+            existing = await run_in_threadpool(
+                db.query_one,
+                "SELECT id FROM jobs WHERE book_id=%s AND target_page_index=%s AND owner=%s "
+                "AND action='translate' AND status IN ('queued','running') LIMIT 1",
+                (book_id, page_index, owner))
+            if existing:
+                return {"job_id": existing["id"], "status": "queued", "duplicate": True,
+                        "job_url": f"/v1/jobs/{existing['id']}"}
     real_book_id = book_id or f"_adhoc_{owner[:12]}_{sha1_bytes(raw)[:12]}"
     real_page_index = page_index if page_index is not None else 0
 
@@ -802,8 +848,9 @@ async def translate_page(
     job_id = str(uuid.uuid4())
     await run_in_threadpool(
         db.execute,
-        "INSERT INTO jobs (id, owner, book_id, action, status, config_json) VALUES (%s,%s,%s,'translate','queued',%s)",
-        (job_id, owner, book_id, json.dumps({k: v for k, v in cfg.items() if k != "context_text"}, ensure_ascii=False)))
+        "INSERT INTO jobs (id, owner, book_id, target_page_index, action, status, config_json) "
+        "VALUES (%s,%s,%s,%s,'translate','queued',%s)",
+        (job_id, owner, book_id, page_index, json.dumps(public_config(cfg), ensure_ascii=False)))
 
     if async_mode:
         asyncio.create_task(_run_translate_job(
@@ -858,6 +905,15 @@ async def _execute_translate(raw, cfg, owner, real_book_id, real_page_index, ord
     async with lock:
         if _is_book_deleted(real_book_id):
             raise HTTPException(404, detail="book deleted")
+        if ctx_source != "client" and S.CONTEXT_PAGES > 0:
+            fresh_context = await run_in_threadpool(
+                book_context_from_db, real_book_id, real_page_index, S.CONTEXT_PAGES)
+            if fresh_context:
+                cfg["context_text"] = fresh_context
+                ctx_source = "db"
+            else:
+                cfg.pop("context_text", None)
+                ctx_source = "none"
         # ---- L1 结果缓存（Redis 存 JSON，图片落磁盘）----
         if not force:
             cached_payload_json = await cache_get(redis_key)
@@ -906,7 +962,7 @@ async def _execute_translate(raw, cfg, owner, real_book_id, real_page_index, ord
                 blocks = normalize_blocks(result, cfg["translator"]["target_lang"], include_background=include_background)
                 payload = {
                     "blocks": blocks,
-                    "config": {k: v for k, v in cfg.items() if k != "context_text"},
+                    "config": public_config(cfg),
                     "context_used": ctx_source,
                     "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 }
@@ -962,8 +1018,11 @@ def _persist_page(book_id, owner, page_index, order_dir, title, img_sha, cfg_has
            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
            ON DUPLICATE KEY UPDATE
              order_dir=COALESCE(VALUES(order_dir), order_dir),
-             orig_sha1=VALUES(orig_sha1), config_hash=VALUES(config_hash),
-             orig_path=VALUES(orig_path), out_path=VALUES(out_path), json_path=VALUES(json_path),
+             orig_sha1=IF(VALUES(status)='done', VALUES(orig_sha1), orig_sha1),
+             config_hash=IF(VALUES(status)='done', VALUES(config_hash), config_hash),
+             orig_path=COALESCE(VALUES(orig_path), orig_path),
+             out_path=COALESCE(VALUES(out_path), out_path),
+             json_path=COALESCE(VALUES(json_path), json_path),
              status=VALUES(status), attempts=attempts+VALUES(attempts), error=VALUES(error),
              elapsed_ms=VALUES(elapsed_ms), tokens=VALUES(tokens)""",
         (book_id, page_index, order_dir, img_sha, cfg_hash,
@@ -1028,7 +1087,10 @@ async def page_image(page_id: int, orig: int = Query(0, description="1=原图"),
     row = await run_in_threadpool(db.query_one, "SELECT * FROM pages WHERE id=%s", (page_id,))
     if not row:
         raise HTTPException(404, detail="page not found")
-    path = row["orig_path"] if orig else (row["out_path"] or row["orig_path"])
+    if orig:
+        path = row["orig_path"]
+    else:
+        path = row["out_path"] or str(page_paths(row["book_id"], row["page_index"])[1])
     if not path or not Path(path).exists():
         if orig:
             # 同步书的原图在 zip 里，按需读出来返回
@@ -1079,6 +1141,7 @@ async def retranslate(page_id: int, body: Optional[dict] = None, owner: str = De
 
     overrides = body.get("config") or {}
     cfg = deep_merge(S.DEFAULT_CONFIG, overrides)
+    _require_client_translator_config(cfg)
     ctx_text = ""
     if body.get("context"):
         ctx_text = build_context_text(body["context"])
@@ -1089,6 +1152,13 @@ async def retranslate(page_id: int, body: Optional[dict] = None, owner: str = De
         cfg["context_text"] = ctx_text
 
     async with get_book_lock(row["book_id"]), _engine_sem.acquire():
+        if not body.get("context") and row["book_id"] and S.CONTEXT_PAGES > 0:
+            ctx_text = await run_in_threadpool(
+                book_context_from_db, row["book_id"], row["page_index"], S.CONTEXT_PAGES)
+        if ctx_text:
+            cfg["context_text"] = ctx_text
+        else:
+            cfg.pop("context_text", None)
         data = await call_engine(raw, cfg)
         if _is_book_deleted(row["book_id"]):
             raise HTTPException(404, detail="book deleted")
@@ -1096,7 +1166,7 @@ async def retranslate(page_id: int, body: Optional[dict] = None, owner: str = De
         blocks = normalize_blocks(data.get("result") or {}, cfg["translator"]["target_lang"],
                                   include_background=True)
         payload = {"blocks": blocks, "raw_result": data.get("result") or {},
-                   "config": {k: v for k, v in cfg.items() if k != "context_text"},
+                   "config": public_config(cfg),
                    "context_used": "retranslate", "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}
         out_path = Path(row["out_path"] or page_paths(row["book_id"], row["page_index"])[1])
         json_path = Path(row["json_path"] or page_paths(row["book_id"], row["page_index"])[2])
@@ -1118,19 +1188,24 @@ async def upsert_book(body: dict, owner: str = Depends(get_owner)):
     row = await run_in_threadpool(db.query_one, "SELECT owner FROM books WHERE id=%s", (bid,))
     if row and str(row["owner"]) != str(owner):
         raise HTTPException(403, detail="book belongs to another user")
+    title_changed_at = _client_timestamp(body.get("title_changed_at"))
+    mode_changed_at = _client_timestamp(body.get("mode_changed_at"))
     await run_in_threadpool(
         db.execute,
-        """INSERT INTO books (id, title, format, mode, page_count, order_dir, owner, hash, fingerprint)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-           ON DUPLICATE KEY UPDATE title=COALESCE(VALUES(title),title),
-             format=COALESCE(VALUES(format),format),
-             mode=COALESCE(VALUES(mode),mode),
+        """INSERT INTO books (id, title, format, mode, page_count, order_dir, owner, hash, fingerprint,
+                             title_changed_at, mode_changed_at)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+           ON DUPLICATE KEY UPDATE format=COALESCE(VALUES(format),format),
+             title=IF(VALUES(title_changed_at) > title_changed_at AND VALUES(title) IS NOT NULL, VALUES(title), title),
+             title_changed_at=IF(VALUES(title_changed_at) > title_changed_at, VALUES(title_changed_at), title_changed_at),
+             mode=IF(VALUES(mode_changed_at) > mode_changed_at, VALUES(mode), mode),
+             mode_changed_at=IF(VALUES(mode_changed_at) > mode_changed_at, VALUES(mode_changed_at), mode_changed_at),
              page_count=COALESCE(VALUES(page_count),page_count),
              order_dir=COALESCE(VALUES(order_dir),order_dir),
              hash=COALESCE(VALUES(hash),hash),
              fingerprint=COALESCE(VALUES(fingerprint),fingerprint)""",
         (bid, body.get("title"), body.get("format"), body.get("mode"), body.get("page_count"), body.get("order_dir"), owner,
-         body.get("hash"), body.get("fingerprint")))
+         body.get("hash"), body.get("fingerprint"), title_changed_at or None, mode_changed_at or None))
     _unmark_book_deleted(bid)
     return {"ok": True, "book_id": bid}
 
@@ -1178,6 +1253,15 @@ async def translate_all(
     if not images:
         raise HTTPException(400, detail="no images")
 
+    overrides: Dict[str, Any] = {}
+    if config:
+        try:
+            overrides = json.loads(config)
+        except json.JSONDecodeError as e:
+            raise HTTPException(400, detail=f"config 不是合法 JSON: {e}")
+    cfg = deep_merge(S.DEFAULT_CONFIG, overrides)
+    _require_client_translator_config(cfg)
+
     raws: List[bytes] = []
     for img in images:
         b = await img.read()
@@ -1203,14 +1287,6 @@ async def translate_all(
             f"UPDATE pages SET status='pending', error=NULL WHERE book_id=%s AND page_index IN ({ph}) AND status='failed'",
             (book_id, *indices))
 
-    overrides: Dict[str, Any] = {}
-    if config:
-        try:
-            overrides = json.loads(config)
-        except json.JSONDecodeError as e:
-            raise HTTPException(400, detail=f"config 不是合法 JSON: {e}")
-    cfg = deep_merge(S.DEFAULT_CONFIG, overrides)
-
     # 登记书元信息（page_count 供书库展示）
     await run_in_threadpool(
         db.execute,
@@ -1230,7 +1306,7 @@ async def translate_all(
     await run_in_threadpool(
         db.execute,
         "INSERT INTO jobs (id, owner, book_id, action, status, config_json) VALUES (%s,%s,%s,'translate_all','queued',%s)",
-        (job_id, owner, book_id, json.dumps({k: v for k, v in cfg.items() if k != "context_text"}, ensure_ascii=False)))
+        (job_id, owner, book_id, json.dumps(public_config(cfg), ensure_ascii=False)))
     await _whole_book_queue.put(
         (job_id, lambda: _run_translate_all(job_id, owner, book_id, title, order_dir, cfg, indices, raws, force)))
     return {"book_job_id": job_id, "status": "queued", "total": len(raws)}
@@ -1282,6 +1358,8 @@ async def _run_translate_all(job_id, owner, book_id, title, order_dir, cfg, indi
                 await run_in_threadpool(
                     _persist_page, book_id, owner, idx, order_dir, title, img_sha, cfg_hash,
                     raw, None, None, "failed", 1, str(e)[:2000], 0, None)
+                if _is_fatal_translator_error(e):
+                    raise
         if not cancelled:
             await run_in_threadpool(db.execute, "UPDATE jobs SET status='done', finished_at=NOW() WHERE id=%s", (job_id,))
     except Exception as e:      # noqa: BLE001
@@ -1302,6 +1380,12 @@ async def translate_all_from_zip(
 ):
     """全书翻译（服务端自取图）：已同步的书不上传页图，直接从云端 zip 按 pages/* 顺序取图翻译。"""
     await _ensure_book_owner(book_id, owner)
+    try:
+        overrides = json.loads(config) if config else {}
+    except json.JSONDecodeError as e:
+        raise HTTPException(400, detail=f"config 不是合法 JSON: {e}")
+    cfg = deep_merge(S.DEFAULT_CONFIG, overrides)
+    _require_client_translator_config(cfg)
     row = await run_in_threadpool(
         db.query_one,
         "SELECT zip_path FROM books WHERE id=%s AND owner=%s AND zip_path IS NOT NULL", (book_id, owner))
@@ -1334,9 +1418,6 @@ async def translate_all_from_zip(
             f"UPDATE pages SET status='pending', error=NULL WHERE book_id=%s AND page_index IN ({ph}) AND status='failed'",
             (book_id, *indices))
 
-    overrides = json.loads(config) if config else {}
-    cfg = deep_merge(S.DEFAULT_CONFIG, overrides)
-
     # 同一本书已存在活动任务：不重复建 job，直接返回已有的 job id（防云端/本地重复触发）
     existing = await run_in_threadpool(
         db.query_one, "SELECT id FROM jobs WHERE book_id=%s AND status IN ('queued','running') LIMIT 1", (book_id,))
@@ -1347,7 +1428,7 @@ async def translate_all_from_zip(
     await run_in_threadpool(
         db.execute,
         "INSERT INTO jobs (id, owner, book_id, action, status, config_json) VALUES (%s,%s,%s,'translate_all','queued',%s)",
-        (job_id, owner, book_id, json.dumps({k: v for k, v in cfg.items() if k != "context_text"}, ensure_ascii=False)))
+        (job_id, owner, book_id, json.dumps(public_config(cfg), ensure_ascii=False)))
     await _whole_book_queue.put(
         (job_id, lambda: _run_translate_all_from_zip(job_id, owner, book_id, title, order_dir, cfg, indices, names, force)))
     return {"book_job_id": job_id, "status": "queued", "total": len(indices)}
@@ -1398,6 +1479,8 @@ async def _run_translate_all_from_zip(job_id, owner, book_id, title, order_dir, 
                     await run_in_threadpool(
                         _persist_page, book_id, owner, idx, order_dir, title, img_sha, cfg_hash,
                         raw, None, None, "failed", 1, str(e)[:2000], 0, None)
+                    if _is_fatal_translator_error(e):
+                        raise
         if not cancelled:
             await run_in_threadpool(db.execute, "UPDATE jobs SET status='done', finished_at=NOW() WHERE id=%s", (job_id,))
     except Exception as e:      # noqa: BLE001
@@ -1410,13 +1493,25 @@ async def _run_translate_all_from_zip(job_id, owner, book_id, title, order_dir, 
 async def translate_book_page(book_id: str, page_index: int, force: bool = Form(False),
                               config: Optional[str] = Form(None), owner: str = Depends(get_owner)):
     """单页翻译（服务端自取图）：已同步的书不上传图片，从 orig_path / 云端 zip 取原图。async 任务。"""
+    try:
+        overrides = json.loads(config) if config else {}
+    except json.JSONDecodeError as e:
+        raise HTTPException(400, detail=f"config 不是合法 JSON: {e}")
+    cfg = deep_merge(S.DEFAULT_CONFIG, overrides)
+    _require_client_translator_config(cfg)
     await _ensure_book_owner(book_id, owner)
+    existing = await run_in_threadpool(
+        db.query_one,
+        "SELECT id FROM jobs WHERE book_id=%s AND target_page_index=%s AND owner=%s "
+        "AND action='translate' AND status IN ('queued','running') LIMIT 1",
+        (book_id, page_index, owner))
+    if existing:
+        return {"job_id": existing["id"], "status": "queued", "duplicate": True,
+                "job_url": f"/v1/jobs/{existing['id']}"}
     raw = await run_in_threadpool(_read_book_page_bytes, book_id, page_index, owner)
     if raw is None:
         raise HTTPException(404, detail="服务端没有该页图片（未同步或 zip 缺失）")
 
-    overrides = json.loads(config) if config else {}
-    cfg = deep_merge(S.DEFAULT_CONFIG, overrides)
     ctx_source = "none"
     if S.CONTEXT_PAGES > 0:
         ctx_text = await run_in_threadpool(book_context_from_db, book_id, page_index, S.CONTEXT_PAGES)
@@ -1433,12 +1528,28 @@ async def translate_book_page(book_id: str, page_index: int, force: bool = Form(
     job_id = str(uuid.uuid4())
     await run_in_threadpool(
         db.execute,
-        "INSERT INTO jobs (id, owner, book_id, action, status, config_json) VALUES (%s,%s,%s,'translate','queued',%s)",
-        (job_id, owner, book_id, json.dumps({k: v for k, v in cfg.items() if k != "context_text"}, ensure_ascii=False)))
+        "INSERT INTO jobs (id, owner, book_id, target_page_index, action, status, config_json) "
+        "VALUES (%s,%s,%s,%s,'translate','queued',%s)",
+        (job_id, owner, book_id, page_index, json.dumps(public_config(cfg), ensure_ascii=False)))
     asyncio.create_task(_run_translate_job(job_id, owner, raw, cfg, book_id, page_index, None, None,
                                            img_sha, cfg_hash, cache_key, png_path, redis_key,
                                            ctx_source, False, force))
     return {"job_id": job_id, "status": "queued", "job_url": f"/v1/jobs/{job_id}"}
+
+
+@app.get("/v1/books/{book_id}/active-page-jobs", dependencies=[Depends(auth)])
+async def active_page_jobs(book_id: str, owner: str = Depends(get_owner)):
+    rows = await run_in_threadpool(
+        db.query,
+        "SELECT id, target_page_index, status FROM jobs "
+        "WHERE book_id=%s AND owner=%s AND action='translate' "
+        "AND target_page_index IS NOT NULL AND status IN ('queued','running') "
+        "ORDER BY queued_at",
+        (book_id, owner))
+    return {"jobs": [
+        {"job_id": row["id"], "page_index": row["target_page_index"], "status": row["status"]}
+        for row in rows
+    ]}
 
 
 @app.delete("/v1/books/{book_id}", dependencies=[Depends(auth)])
@@ -1497,12 +1608,47 @@ async def cancel_book_jobs(book_id: str, owner: str = Depends(get_owner)):
 # 账号隔离：owner = users.id（API Key 派生）。书 zip 与翻译结果永久保留（取消同步才删）。
 # 云端书与本地书共用 books 表：zip_path 非空 = 已同步；zip_path 为 NULL = 仅本地/仅翻译。
 
+MAX_CLOUD_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
+MAX_CLOUD_UNCOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024
+
+
+def _client_timestamp(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return 0
+    return value
+
+
+def _validate_cloud_zip(path: Path) -> int:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            entries = archive.infolist()
+            total_size = sum(e.file_size for e in entries if not e.is_dir())
+            if total_size > MAX_CLOUD_UNCOMPRESSED_BYTES:
+                raise ValueError("zip 解压后超过大小限制")
+            if not any(e.filename.startswith("pages/") and not e.is_dir() for e in entries):
+                raise ValueError("zip 缺少 pages/ 页面")
+            if any(e.filename.startswith(("/", "\\")) or ".." in Path(e.filename).parts for e in entries):
+                raise ValueError("zip 包含非法路径")
+            return sum(1 for e in entries if e.filename.startswith("pages/") and not e.is_dir())
+    except zipfile.BadZipFile:
+        raise ValueError("zip 文件无效")
+
+
+def _normalize_folder_name(name: Optional[str]) -> str:
+    value = (name or "").strip()
+    if not value:
+        raise ValueError("收藏夹名称不能为空")
+    if len(value) > 80:
+        raise ValueError("收藏夹名称不能超过 80 字符")
+    return value
+
 def _upsert_folder(owner: str, name: str) -> int:
+    safe_name = _normalize_folder_name(name)
     db.execute(
         "INSERT INTO cloud_folders (owner, name) VALUES (%s,%s) "
         "ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id)",
-        (owner, name))
-    return db.query_one("SELECT id FROM cloud_folders WHERE owner=%s AND name=%s", (owner, name))["id"]
+        (owner, safe_name))
+    return db.query_one("SELECT id FROM cloud_folders WHERE owner=%s AND name=%s", (owner, safe_name))["id"]
 
 
 async def _migrate_book(old_id: str, new_id: str, owner: str) -> None:
@@ -1547,30 +1693,67 @@ async def cloud_upload(req: Request, owner: str = Depends(get_owner),
                        hash_: str = Form(..., alias="hash"),
                        fingerprint: Optional[str] = Form(None),
                        page_count: Optional[int] = Form(None),
-                       old_book_id: Optional[str] = Form(None, description="本地 UUID，若有已翻页则迁移到云端 id")):
+                       title_changed_at: Optional[int] = Form(None),
+                       mode_changed_at: Optional[int] = Form(None),
+                       folder_changed_at: Optional[int] = Form(None),
+    old_book_id: Optional[str] = Form(None, description="本地 UUID，若有已翻页则迁移到云端 id")):
     """同步一本本地书（zip 包）。按 owner+hash 去重：已存在直接返回现有 id。"""
-    raw = await file.read()
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", hash_ or ""):
+        raise HTTPException(400, detail="hash 必须是 64 位 SHA-256 十六进制")
     existing = await run_in_threadpool(
         db.query_one,
         "SELECT id FROM books WHERE owner=%s AND hash=%s AND zip_path IS NOT NULL", (owner, hash_))
-    book_id = existing["id"] if existing else None
+    collision = await run_in_threadpool(db.query_one, "SELECT owner FROM books WHERE id=%s", (hash_,))
+    has_cross_owner_collision = collision is not None and str(collision["owner"]) != str(owner)
+    book_id = existing["id"] if existing else (f"{owner}-{hash_}" if has_cross_owner_collision else hash_)
     existed = existing is not None
-
-    if not book_id:
-        book_id = hash_   # 云端书 id 统一用内容 hash（本地书/云端书同一 key，跨设备共享）
-        folder_id = None
-        if folder:
-            folder_id = await run_in_threadpool(_upsert_folder, owner, folder)
-        zip_path = S.CLOUD_DIR / book_id / "book.zip"
+    try:
+        folder_id = await run_in_threadpool(_upsert_folder, owner, folder) if folder else None
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
+    zip_path = S.CLOUD_DIR / book_id / "book.zip"
+    temp_path = zip_path.with_name(f".{uuid.uuid4().hex}.tmp")
+    size = 0
+    try:
         zip_path.parent.mkdir(parents=True, exist_ok=True)
-        await run_in_threadpool(zip_path.write_bytes, raw)
+        with temp_path.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_CLOUD_UPLOAD_BYTES:
+                    raise HTTPException(413, detail="云同步包超过 2GB 限制")
+                out.write(chunk)
+        if size == 0:
+            raise HTTPException(400, detail="云同步包不能为空")
+        try:
+            await run_in_threadpool(_validate_cloud_zip, temp_path)
+        except ValueError as exc:
+            raise HTTPException(400, detail=str(exc))
+        temp_path.replace(zip_path)
+        title_ts = _client_timestamp(title_changed_at)
+        mode_ts = _client_timestamp(mode_changed_at)
+        folder_ts = _client_timestamp(folder_changed_at)
         await run_in_threadpool(
             db.execute,
-            "INSERT INTO books (id, owner, title, mode, page_count, hash, fingerprint, zip_path, size, folder_id, synced_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW()) "
-            "ON DUPLICATE KEY UPDATE mode=VALUES(mode), hash=VALUES(hash), fingerprint=VALUES(fingerprint), "
-            "zip_path=VALUES(zip_path), size=VALUES(size), folder_id=VALUES(folder_id), synced_at=NOW()",
-            (book_id, owner, title, mode, page_count, hash_, fingerprint, str(zip_path), len(raw), folder_id))
+            "INSERT INTO books (id, owner, title, mode, page_count, hash, fingerprint, zip_path, size, folder_id, "
+            "folder_changed_at, title_changed_at, mode_changed_at, synced_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW()) "
+            "ON DUPLICATE KEY UPDATE "
+            "title=IF(VALUES(title_changed_at)>title_changed_at AND VALUES(title) IS NOT NULL, VALUES(title), title), "
+            "title_changed_at=IF(VALUES(title_changed_at)>title_changed_at, VALUES(title_changed_at), title_changed_at), "
+            "mode=IF(VALUES(mode_changed_at)>mode_changed_at AND VALUES(mode) IS NOT NULL, VALUES(mode), mode), "
+            "mode_changed_at=IF(VALUES(mode_changed_at)>mode_changed_at, VALUES(mode_changed_at), mode_changed_at), "
+            "hash=VALUES(hash), fingerprint=VALUES(fingerprint), zip_path=VALUES(zip_path), size=VALUES(size), "
+            "folder_id=IF(VALUES(folder_changed_at)>folder_changed_at, VALUES(folder_id), folder_id), "
+            "folder_changed_at=IF(VALUES(folder_changed_at)>folder_changed_at, VALUES(folder_changed_at), folder_changed_at), "
+            "synced_at=NOW()",
+            (book_id, owner, title, mode, page_count, hash_, fingerprint, str(zip_path), size, folder_id,
+             folder_ts or None, title_ts or None, mode_ts or None))
+    finally:
+        if temp_path.exists():
+            await run_in_threadpool(temp_path.unlink, missing_ok=True)
     _unmark_book_deleted(book_id)
 
     # 先翻译后同步：把本地 UUID 下的旧译文迁到 cloudId
@@ -1585,6 +1768,7 @@ async def cloud_list(owner: str = Depends(get_owner)):
     rows = await run_in_threadpool(
         db.query,
         "SELECT b.id, b.title, b.mode, b.page_count, b.hash, b.fingerprint, b.size, b.synced_at, "
+        "b.title_changed_at, b.mode_changed_at, b.folder_changed_at, "
         "f.name AS folder FROM books b "
         "LEFT JOIN cloud_folders f ON b.folder_id=f.id "
         "WHERE b.owner=%s AND b.zip_path IS NOT NULL ORDER BY b.synced_at DESC",
@@ -1647,11 +1831,16 @@ async def cloud_book_folder(book_id: str, body: dict, owner: str = Depends(get_o
     name = (body.get("folder") or "").strip()
     folder_id = None
     if name:
-        folder_id = await run_in_threadpool(_upsert_folder, owner, name)
+        try:
+            folder_id = await run_in_threadpool(_upsert_folder, owner, name)
+        except ValueError as exc:
+            raise HTTPException(400, detail=str(exc))
+    changed_at = int(time.time() * 1000)
     await run_in_threadpool(
         db.execute,
-        "UPDATE books SET folder_id=%s WHERE id=%s AND owner=%s AND zip_path IS NOT NULL",
-        (folder_id, book_id, owner))
+        "UPDATE books SET folder_id=%s, folder_changed_at=%s "
+        "WHERE id=%s AND owner=%s AND zip_path IS NOT NULL",
+        (folder_id, changed_at, book_id, owner))
     return {"ok": True, "book_id": book_id, "folder": name or None}
 
 
@@ -1680,10 +1869,11 @@ async def cloud_folders(owner: str = Depends(get_owner)):
 
 @app.post("/v1/cloud/folders", dependencies=[Depends(auth)])
 async def cloud_folder_create(body: dict, owner: str = Depends(get_owner)):
-    name = (body.get("name") or "").strip()
-    if not name:
-        raise HTTPException(400, detail="缺少 name")
-    fid = await run_in_threadpool(_upsert_folder, owner, name)
+    try:
+        name = await run_in_threadpool(_normalize_folder_name, body.get("name"))
+        fid = await run_in_threadpool(_upsert_folder, owner, name)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
     return {"ok": True, "folder_id": fid, "name": name}
 
 
@@ -1852,16 +2042,22 @@ async def sync(body: dict, owner: str = Depends(get_owner)):
         row = await run_in_threadpool(db.query_one, "SELECT owner FROM books WHERE id=%s", (bid,))
         if row and str(row["owner"]) != str(owner):
             continue
+        title_changed_at = _client_timestamp(b.get("title_changed_at"))
+        mode_changed_at = _client_timestamp(b.get("mode_changed_at"))
         await run_in_threadpool(
             db.execute,
-            """INSERT INTO books (id, title, mode, page_count, order_dir, owner, hash, fingerprint) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-               ON DUPLICATE KEY UPDATE title=COALESCE(VALUES(title),title),
-                 mode=COALESCE(VALUES(mode),mode),
+            """INSERT INTO books (id, title, mode, page_count, order_dir, owner, hash, fingerprint,
+                                 title_changed_at, mode_changed_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON DUPLICATE KEY UPDATE title=IF(VALUES(title_changed_at)>title_changed_at AND VALUES(title) IS NOT NULL, VALUES(title), title),
+                 title_changed_at=IF(VALUES(title_changed_at)>title_changed_at, VALUES(title_changed_at), title_changed_at),
+                 mode=IF(VALUES(mode_changed_at)>mode_changed_at AND VALUES(mode) IS NOT NULL, VALUES(mode), mode),
+                 mode_changed_at=IF(VALUES(mode_changed_at)>mode_changed_at, VALUES(mode_changed_at), mode_changed_at),
                  page_count=COALESCE(VALUES(page_count),page_count),
                  order_dir=COALESCE(VALUES(order_dir),order_dir),
                  hash=COALESCE(VALUES(hash),hash),
                  fingerprint=COALESCE(VALUES(fingerprint),fingerprint)""",
-            (bid, b.get("title"), b.get("mode"), b.get("page_count"), b.get("order_dir"), owner, b.get("hash"), b.get("fingerprint")))
+            (bid, b.get("title"), b.get("mode"), b.get("page_count"), b.get("order_dir"), owner, b.get("hash"), b.get("fingerprint"),
+             title_changed_at or None, mode_changed_at or None))
         _unmark_book_deleted(bid)
     # 5) 夹归属（本地书/云端书通用，id=hash；LWW：只接受更新的移动时间；folder 空 = 移出未分类）
     #    必须在 books upsert 之后，否则新导入的书还没有行，folder 更新会落空
@@ -1871,7 +2067,15 @@ async def sync(body: dict, owner: str = Depends(get_owner)):
         changed_at = f.get("changed_at")
         if not bid or not isinstance(changed_at, int):
             continue
-        fid = await run_in_threadpool(_upsert_folder, owner, name) if name else None
+        row = await run_in_threadpool(
+            db.query_one,
+            "SELECT id FROM books WHERE owner=%s AND hash=%s", (owner, bid))
+        if row:
+            bid = row["id"]
+        try:
+            fid = await run_in_threadpool(_upsert_folder, owner, name) if name else None
+        except ValueError:
+            continue
         await run_in_threadpool(
             db.execute,
             "UPDATE books SET folder_id=%s, folder_changed_at=%s "
@@ -1896,7 +2100,8 @@ async def sync(body: dict, owner: str = Depends(get_owner)):
         db.query, "SELECT hash, page, last_read_at FROM reading_progress WHERE owner=%s", (owner,))
     cloud_books = await run_in_threadpool(
         db.query,
-        "SELECT b.id, b.title, b.mode, b.page_count, b.hash, b.fingerprint, b.size, f.name AS folder "
+        "SELECT b.id, b.title, b.mode, b.page_count, b.hash, b.fingerprint, b.size, "
+        "b.title_changed_at, b.mode_changed_at, f.name AS folder "
         "FROM books b LEFT JOIN cloud_folders f ON b.folder_id=f.id "
         "WHERE b.owner=%s AND b.zip_path IS NOT NULL", (owner,))
     translation = []

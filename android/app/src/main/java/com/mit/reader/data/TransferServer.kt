@@ -14,9 +14,18 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
+import java.net.Inet4Address
+import java.net.NetworkInterface
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+
+/** 接收服务首选端口：固定后，被控端重启时遥控端保存的 host:port 仍有效；被占用则退回随机端口。 */
+private const val TRANSFER_PREFERRED_PORT = 35217
+
+private fun pickTransferBindPort(): Int = runCatching {
+    java.net.ServerSocket(TRANSFER_PREFERRED_PORT).use { TRANSFER_PREFERRED_PORT }
+}.getOrDefault(0)
 
 /**
  * 设备对传的接收方：本地 HTTP 服务 + NSD 广播。
@@ -24,12 +33,27 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class TransferServer(
     context: Context,
+    private val localDeviceId: String,
     private val existingBookByHash: (String) -> Book?,
     private val hasTranslatedPage: (String, Int) -> Boolean,
     private val importBook: (File, String) -> TransferImportResult,
     private val onIncoming: (sessionId: String, title: String) -> Unit,
     private val onProgress: (sessionId: String, received: Long, total: Long) -> Unit,
-) : NanoHTTPD(0) {
+    private val remotePair: (
+        code: String,
+        controllerName: String,
+        controllerId: String,
+        controllerEndpoint: String,
+    ) -> RemotePairResult?,
+    private val remoteHeartbeat: (token: String) -> RemoteHostStatus,
+    private val remoteCommand: (token: String, action: RemotePageAction, requestId: String) -> RemoteCommandAck,
+    private val isTransferAuthorized: (token: String) -> Boolean,
+) : NanoHTTPD(pickTransferBindPort()) {
+    private companion object {
+        const val MAX_MANIFEST_BYTES = 1L * 1024 * 1024
+        const val MAX_ACTIVE_SESSIONS = 8
+        const val SESSION_TIMEOUT_MS = 30L * 60 * 1000
+    }
 
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
     private val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
@@ -38,6 +62,9 @@ class TransferServer(
     private val serviceName = "MIT-Reader-${android.os.Build.MODEL.replace(Regex("[^A-Za-z0-9_-]"), "-")}".take(60)
     private val stagingRoot = File(context.cacheDir, "transfers").apply { mkdirs() }
 
+    @Volatile private var discoverable = false
+    @Volatile private var nsdRegistered = false
+
     private data class Session(
         val manifest: JSONObject,
         val stagingDir: File,
@@ -45,6 +72,8 @@ class TransferServer(
         val pageIndexByPath: Map<String, Int>,
         val receivedBytes: MutableMap<String, Long> = ConcurrentHashMap(),
         var totalBytes: Long = 0L,
+        val createdAt: Long = System.currentTimeMillis(),
+        val token: String,
         @Volatile var completed: Boolean = false,
     )
     private val sessions = ConcurrentHashMap<String, Session>()
@@ -64,7 +93,17 @@ class TransferServer(
             android.util.Log.e("TransferServer", "对传接收服务启动失败", e)
         }
         multicastLock.acquire()
-        registerService(getListeningPort())
+        if (discoverable) registerService(getListeningPort())
+    }
+
+    /** 可被发现（NSD 广播）开关：关闭后其他设备搜索不到本机，手动 IP:端口 连接不受影响。 */
+    fun setDiscoverable(enabled: Boolean) {
+        discoverable = enabled
+        if (enabled && !nsdRegistered) {
+            registerService(getListeningPort())
+        } else if (!enabled && nsdRegistered) {
+            runCatching { unregisterService() }
+        }
     }
 
     fun stopReceiver() {
@@ -74,34 +113,90 @@ class TransferServer(
         runCatching { stagingRoot.deleteRecursively() }
     }
 
+    fun localEndpoint(): String? {
+        val address = NetworkInterface.getNetworkInterfaces().asSequence()
+            .flatMap { it.inetAddresses.asSequence() }
+            .filterIsInstance<Inet4Address>()
+            .firstOrNull { !it.isLoopbackAddress && it.isSiteLocalAddress }
+            ?: return null
+        return "${address.hostAddress}:${getListeningPort()}"
+    }
+
     private fun registerService(port: Int) {
         runCatching {
             val info = NsdServiceInfo().apply {
                 serviceName = this@TransferServer.serviceName
                 serviceType = SERVICE_TYPE
                 setPort(port)
+                setAttribute(NSD_KEY_DEVICE_ID, localDeviceId)
             }
             nsdManager.registerService(info, NsdManager.PROTOCOL_DNS_SD, registrationListener)
+            nsdRegistered = true
         }
     }
 
-    private fun unregisterService() = nsdManager.unregisterService(registrationListener)
+    private fun unregisterService() {
+        runCatching { nsdManager.unregisterService(registrationListener) }
+        nsdRegistered = false
+    }
 
     override fun serve(session: IHTTPSession): Response = try {
         val uri = session.uri
         when {
+            uri == "/remote/pair" && session.method.name == "POST" -> handleRemotePair(session)
+            uri == "/remote/heartbeat" && session.method.name == "POST" -> handleRemoteHeartbeat(session)
+            uri == "/remote/command" && session.method.name == "POST" -> handleRemoteCommand(session)
             uri == "/session" && session.method.name == "POST" -> handleSession(session)
             uri.startsWith("/files/") -> handleFile(session, uri)
-            uri.startsWith("/complete/") -> handleComplete(uri)
+            uri.startsWith("/complete/") -> handleComplete(session, uri)
             else -> newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "not found")
         }
     } catch (e: Exception) {
         newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", e.message ?: "error")
     }
 
+    // ---------------------------------------------------------------- remote control
+
+    private fun handleRemotePair(session: IHTTPSession): Response {
+        val body = JSONObject(readBody(session))
+        val code = body.optString("code")
+        val controllerName = body.optString("controllerName")
+        val controllerId = body.optString("controllerId")
+        val controllerEndpoint = body.optString("controllerEndpoint")
+        val paired = remotePair(code, controllerName, controllerId, controllerEndpoint)
+            ?: return badRequest("配对码错误或阅读端未开启遥控")
+        return jsonResponse(JSONObject()
+            .put("ok", true)
+            .put("token", paired.token)
+            .put("hostDeviceId", paired.hostDeviceId)
+            .put("hostName", paired.hostName))
+    }
+
+    private fun handleRemoteHeartbeat(session: IHTTPSession): Response {
+        val body = JSONObject(readBody(session))
+        return jsonResponse(body.optString("token").let(remoteHeartbeat).toJson())
+    }
+
+    private fun handleRemoteCommand(session: IHTTPSession): Response {
+        val body = JSONObject(readBody(session))
+        val action = RemotePageAction.fromWireName(body.optString("action"))
+            ?: return badRequest("未知遥控命令")
+        val ack = remoteCommand(
+            body.optString("token"),
+            action,
+            body.optString("requestId"),
+        )
+        return jsonResponse(ack.toJson())
+    }
+
     // ---------------------------------------------------------------- /session
 
     private fun handleSession(session: IHTTPSession): Response {
+        val token = bearerToken(session) ?: return unauthorizedTransfer()
+        if (!isTransferAuthorized(token)) return unauthorizedTransfer()
+        if (sessions.size >= MAX_ACTIVE_SESSIONS) {
+            return badRequest("传输会话过多，请稍后重试")
+        }
         val body = readBody(session)
         val manifest = JSONObject(body)
         val hash = manifest.optString("hash")
@@ -137,14 +232,20 @@ class TransferServer(
 
         val need = files.keys.toList()
         val requiredBytes = need.sumOf { files[it]?.size ?: 0L }
+        require(requiredBytes >= 0) { "传输清单大小非法" }
         // 预留 64MB 余量，避免解压/建索引时把空间撑满
         val usable = stagingRoot.parentFile?.usableSpace ?: 0L
         val spaceOk = usable >= requiredBytes + 64L * 1024 * 1024
+        require(spaceOk) { "设备空间不足" }
 
         val sessionId = UUID.randomUUID().toString()
         val stagingDir = File(stagingRoot, sessionId).apply { mkdirs() }
         File(stagingDir, "manifest.json").writeText(body)
-        sessions[sessionId] = Session(manifest, stagingDir, files, pageIndexByPath, ConcurrentHashMap(), requiredBytes)
+        sessions[sessionId] = Session(
+            manifest, stagingDir, files, pageIndexByPath, ConcurrentHashMap(),
+            totalBytes = requiredBytes,
+            token = token,
+        )
         mainHandler.post { onIncoming(sessionId, title) }
 
         return jsonResponse(JSONObject().apply {
@@ -159,11 +260,13 @@ class TransferServer(
     // ---------------------------------------------------------------- /files
 
     private fun handleFile(session: IHTTPSession, uri: String): Response {
+        val token = bearerToken(session) ?: return unauthorizedTransfer()
         val parts = uri.removePrefix("/files/").split("/", limit = 2)
         if (parts.size != 2) return badRequest("路径错误")
         val sessionId = parts[0]
         val rest = parts[1]
-        val st = sessions[sessionId] ?: return badRequest("未知会话")
+        val st = validSession(sessionId) ?: return badRequest("未知会话")
+        if (st.token != token) return unauthorizedTransfer()
 
         // 查断点：GET /files/{sid}/{relPath}/offset
         if (rest.endsWith("/offset")) {
@@ -188,9 +291,12 @@ class TransferServer(
         val part = File(st.stagingDir, relPath + ".part").apply { parentFile?.mkdirs() }
         val range = session.headers["range"]
         val startOffset = range?.substringAfter("bytes=")?.substringBefore("-")?.toLongOrNull() ?: 0L
+        require(startOffset in 0..entry.size) { "非法续传偏移" }
+        val contentLength = session.headers["content-length"]?.toLongOrNull() ?: 0L
+        require(startOffset + contentLength <= entry.size) { "上传大小超过清单" }
         RandomAccessFile(part, "rw").use { it.setLength(startOffset) }
         // 只读 Content-Length 个字节就停：客户端发完 body 后仍保持连接等响应，读到 EOF 会一直阻塞
-        var remaining = session.headers["content-length"]?.toLongOrNull() ?: 0L
+        var remaining = contentLength
         var received = startOffset
         val os = FileOutputStream(part, true)
         val buf = ByteArray(64 * 1024)
@@ -227,9 +333,11 @@ class TransferServer(
 
     // ---------------------------------------------------------------- /complete
 
-    private fun handleComplete(uri: String): Response {
+    private fun handleComplete(session: IHTTPSession, uri: String): Response {
+        val token = bearerToken(session) ?: return unauthorizedTransfer()
         val sessionId = uri.removePrefix("/complete/")
-        val st = sessions[sessionId] ?: return badRequest("未知会话")
+        val st = validSession(sessionId) ?: return badRequest("未知会话")
+        if (st.token != token) return unauthorizedTransfer()
         if (st.completed) return jsonResponse(JSONObject().put("ok", true).put("duplicate", true))
         st.completed = true
         val manifestJson = File(st.stagingDir, "manifest.json").readText()
@@ -259,7 +367,8 @@ class TransferServer(
 
     private fun readBody(session: IHTTPSession): String {
         val len = session.headers["content-length"]?.toLongOrNull() ?: 0L
-        val bytes = if (len in 1..(16L * 1024 * 1024)) {
+        require(len in 0..MAX_MANIFEST_BYTES) { "传输清单过大" }
+        val bytes = if (len > 0) {
             val buf = ByteArray(len.toInt())
             var off = 0
             while (off < buf.size) {
@@ -274,6 +383,16 @@ class TransferServer(
         return String(bytes, Charsets.UTF_8)
     }
 
+    private fun validSession(sessionId: String): Session? {
+        val st = sessions[sessionId] ?: return null
+        if (System.currentTimeMillis() - st.createdAt > SESSION_TIMEOUT_MS) {
+            sessions.remove(sessionId)
+            runCatching { st.stagingDir.deleteRecursively() }
+            return null
+        }
+        return st
+    }
+
     private fun safeName(name: String): Boolean =
         name.isNotBlank() && !name.contains("/") && !name.contains("\\") && !name.contains("..")
 
@@ -281,6 +400,19 @@ class TransferServer(
         if (p.isBlank() || p.startsWith("/") || p.contains("..") || p.contains("\\")) return false
         return p.startsWith("pages/") || p.startsWith("translated/")
     }
+
+    private fun bearerToken(session: IHTTPSession): String? {
+        val header = session.headers["authorization"]?.trim() ?: return null
+        if (!header.startsWith("Bearer ", ignoreCase = true)) return null
+        return header.substring(7).trim().takeIf { it.isNotBlank() }
+    }
+
+    private fun unauthorizedTransfer(): Response =
+        newFixedLengthResponse(
+            Response.Status.UNAUTHORIZED,
+            "text/plain",
+            "设备未配对，请先在遥控器模式输入配对码",
+        )
 
     private fun sha256(f: File): String {
         val md = MessageDigest.getInstance("SHA-256")
@@ -297,6 +429,27 @@ class TransferServer(
 
     private fun jsonResponse(o: JSONObject): Response =
         newFixedLengthResponse(Response.Status.OK, "application/json", o.toString())
+
+    private fun RemoteHostStatus.toJson(): JSONObject = JSONObject()
+        .put("ok", ok)
+        .put("reason", reason ?: "")
+        .put("readerActive", readerActive)
+        .put("reader", reader.toJson())
+
+    private fun RemoteCommandAck.toJson(): JSONObject = JSONObject()
+        .put("ok", ok)
+        .put("accepted", accepted)
+        .put("reason", reason ?: "")
+        .put("reader", reader.toJson())
+
+    private fun RemoteReaderSnapshot?.toJson(): Any {
+        this ?: return JSONObject.NULL
+        return JSONObject()
+            .put("bookId", bookId)
+            .put("title", title)
+            .put("page", page)
+            .put("pageCount", pageCount)
+    }
 
     private fun badRequest(msg: String): Response =
         newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", msg)

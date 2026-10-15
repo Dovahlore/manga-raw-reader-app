@@ -18,6 +18,7 @@ import java.util.concurrent.TimeUnit
 
 data class TranslateResp(val pageId: Int, val jobId: String?, val cached: Boolean)
 data class JobStatus(val status: String, val pageId: Int?, val error: String?)
+data class ActivePageJob(val jobId: String, val pageIndex: Int, val status: String)
 data class ServerPage(
     val id: Int,
     val pageIndex: Int,
@@ -44,6 +45,8 @@ data class CloudBook(
     val fingerprint: String?,
     val size: Long?,
     val folder: String?,
+    val titleChangedAt: Long = 0L,
+    val modeChangedAt: Long = 0L,
 )
 data class CloudFolder(val id: Int, val name: String, val bookCount: Int)
 data class AppUpdate(
@@ -90,6 +93,23 @@ class TranslationApi {
             ServerConfig.apiKey.takeIf { it.isNotBlank() }?.let { header("X-API-Token", it) }
         }
 
+    private fun MultipartBody.Builder.addTranslatorConfig(): MultipartBody.Builder {
+        val model = ServerConfig.translatorModel
+        val baseUrl = ServerConfig.translatorBaseUrl
+        val apiKey = ServerConfig.translatorApiKey
+        if (!ServerConfig.isTranslationConfigured()) {
+            throw IllegalStateException("请先在设置中保存模型名、Base URL 和模型 API Key")
+        }
+        val translator = JSONObject()
+            .put("translator", "custom_openai")
+            .put("target_lang", "CHS")
+            .put("model", model)
+            .put("api_base", baseUrl)
+            .put("api_key", apiKey)
+        addFormDataPart("config", JSONObject().put("translator", translator).toString())
+        return this
+    }
+
     /** 上传一页翻译。async=true 立刻拿 jobId 去轮询；false 同步等结果（慢）。 */
     suspend fun translate(image: File, bookId: String, pageIndex: Int, async: Boolean, force: Boolean = false): TranslateResp =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -97,6 +117,7 @@ class TranslationApi {
                 .addFormDataPart("image", image.name, image.asRequestBody("image/jpeg".toMediaType()))
                 .addFormDataPart("book_id", bookId)
                 .addFormDataPart("page_index", pageIndex.toString())
+                .addTranslatorConfig()
                 .apply {
                     if (async) addFormDataPart("async_mode", "true")
                     if (force) addFormDataPart("force", "true")
@@ -128,6 +149,24 @@ class TranslationApi {
             )
         }
     }
+
+    suspend fun activePageJobs(bookId: String): List<ActivePageJob> =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val req = Request.Builder().url("$base/v1/books/$bookId/active-page-jobs").authed().build()
+            client.newCall(req).execute().use { resp ->
+                val text = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${text.take(200)}")
+                val arr = JSONObject(text).optJSONArray("jobs") ?: JSONArray()
+                (0 until arr.length()).map { i ->
+                    val o = arr.getJSONObject(i)
+                    ActivePageJob(
+                        jobId = o.getString("job_id"),
+                        pageIndex = o.getInt("page_index"),
+                        status = o.getString("status"),
+                    )
+                }
+            }
+        }
 
     /** 拉服务端全部书的翻译汇总（done/failed 页数），给书库「翻译进度」页用。 */
     suspend fun listBooks(): List<ServerBook> =
@@ -188,6 +227,7 @@ class TranslationApi {
             .addFormDataPart("book_id", bookId)
             .addFormDataPart("page_count", pageCount.toString())
             .addFormDataPart("page_indices", JSONArray(pageIndices).toString())
+            .addTranslatorConfig()
         title?.takeIf { it.isNotBlank() }?.let { builder.addFormDataPart("title", it) }
         orderDir?.let { builder.addFormDataPart("order_dir", it) }
         for (img in images) {
@@ -212,6 +252,7 @@ class TranslationApi {
         force: Boolean = false,
     ): String = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addTranslatorConfig()
         if (!pageIndices.isNullOrEmpty()) {
             body.addFormDataPart("page_indices", JSONArray(pageIndices).toString())
         }
@@ -247,6 +288,7 @@ class TranslationApi {
     suspend fun translateFromServer(bookId: String, pageIndex: Int, force: Boolean = false): String =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+                .addTranslatorConfig()
             if (force) body.addFormDataPart("force", "true")
             val req = Request.Builder().url("$base/v1/books/$bookId/pages/$pageIndex/translate").authed().post(body.build()).build()
             client.newCall(req).execute().use { resp ->
@@ -306,6 +348,8 @@ class TranslationApi {
     suspend fun upsertBook(
         bookId: String, title: String, pageCount: Int, orderDir: String, hash: String,
         mode: String? = null, fingerprint: String? = null,
+        titleChangedAt: Long = 0L,
+        modeChangedAt: Long = 0L,
     ): Boolean =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             val body = JSONObject().apply {
@@ -316,6 +360,8 @@ class TranslationApi {
                 if (hash.isNotEmpty()) put("hash", hash)
                 mode?.takeIf { it.isNotBlank() }?.let { put("mode", it) }
                 fingerprint?.takeIf { it.isNotBlank() }?.let { put("fingerprint", it) }
+                if (titleChangedAt > 0L) put("title_changed_at", titleChangedAt)
+                if (modeChangedAt > 0L) put("mode_changed_at", modeChangedAt)
             }.toString().toRequestBody("application/json".toMediaType())
             val req = Request.Builder().url("$base/v1/books").authed().post(body).build()
             client.newCall(req).execute().use { it.isSuccessful }
@@ -367,6 +413,9 @@ class TranslationApi {
         hash: String,
         fingerprint: String?,
         pageCount: Int,
+        titleChangedAt: Long = 0L,
+        modeChangedAt: Long = 0L,
+        folderChangedAt: Long = 0L,
         oldBookId: String? = null,
         onProgress: ((Long, Long) -> Unit)? = null,
     ): CloudUploadResp = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -396,6 +445,9 @@ class TranslationApi {
         title?.takeIf { it.isNotBlank() }?.let { body.addFormDataPart("title", it) }
         folder?.takeIf { it.isNotBlank() }?.let { body.addFormDataPart("folder", it) }
         fingerprint?.takeIf { it.isNotBlank() }?.let { body.addFormDataPart("fingerprint", it) }
+        if (titleChangedAt > 0L) body.addFormDataPart("title_changed_at", titleChangedAt.toString())
+        if (modeChangedAt > 0L) body.addFormDataPart("mode_changed_at", modeChangedAt.toString())
+        if (folderChangedAt > 0L) body.addFormDataPart("folder_changed_at", folderChangedAt.toString())
         oldBookId?.takeIf { it.isNotBlank() }?.let { body.addFormDataPart("old_book_id", it) }
         val req = Request.Builder().url("$base/v1/cloud/books").authed().post(body.build()).build()
         client.newCall(req).execute().use { resp ->
@@ -424,6 +476,8 @@ class TranslationApi {
                     fingerprint = if (o.isNull("fingerprint")) null else o.optString("fingerprint").takeIf { it.isNotBlank() },
                     size = if (o.isNull("size")) null else o.optLong("size"),
                     folder = if (o.isNull("folder")) null else o.optString("folder").takeIf { it.isNotBlank() },
+                    titleChangedAt = o.optLong("title_changed_at", 0L),
+                    modeChangedAt = o.optLong("mode_changed_at", 0L),
                 )
             }
         }

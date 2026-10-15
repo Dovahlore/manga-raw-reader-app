@@ -77,8 +77,8 @@ services:
       HF_URL_MIRROR: ${MIT_HF_ENDPOINT:-https://hf-mirror.com}
       # 关掉 HF 的 xet 桥（cas-bridge.xethub.hf.co），国内常 SSL EOF 导致权重下不全
       HF_HUB_DISABLE_XET: "1"
-      # 跨页上下文：翻译每页时带上前一页作参考（0 = 关闭）
-      MIT_CONTEXT_SIZE: "${MIT_CONTEXT_SIZE:-1}"
+      # 跨页上下文：翻译每页时带上前三页作参考（0 = 关闭）
+      MIT_CONTEXT_SIZE: "${MIT_CONTEXT_SIZE:-3}"
       HTTP_PROXY: ${MIT_PROXY_URL:-http://host.docker.internal:7897}
       HTTPS_PROXY: ${MIT_PROXY_URL:-http://host.docker.internal:7897}
       NO_PROXY: "localhost,127.0.0.1,api.deepseek.com,sakura"
@@ -160,7 +160,7 @@ services:
       MIT_REDIS_PASSWORD: "${MIT_REDIS_PASSWORD:-Alexmercer2000@}"
       MIT_DATA_DIR: /data
       MIT_API_TOKEN: ${MIT_API_TOKEN:-}
-      MIT_CONTEXT_PAGES: ${MIT_CONTEXT_PAGES:-1}
+      MIT_CONTEXT_PAGES: ${MIT_CONTEXT_PAGES:-3}
       MIT_TRANSLATOR: ${MIT_TRANSLATOR:-deepseek}
       MIT_TARGET_LANG: ${MIT_TARGET_LANG:-CHS}
       MIT_ENGINE_TIMEOUT: ${MIT_ENGINE_TIMEOUT:-900}

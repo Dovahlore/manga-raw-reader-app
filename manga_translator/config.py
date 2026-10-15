@@ -227,6 +227,12 @@ class TranslatorConfig(BaseModel):
     """Skip translation if source image is one of the provide languages, use comma to separate multiple languages. Example: JPN,ENG"""
     gpt_config: Optional[str] = None  # todo: no more path
     """Path to GPT config file, more info in README"""
+    model: Optional[str] = None
+    """OpenAI-compatible model requested by the client (currently used by custom_openai)"""
+    api_base: Optional[str] = None
+    """OpenAI-compatible API base URL requested by the client"""
+    api_key: Optional[str] = None
+    """Transient API key requested by the client; it must not be persisted or returned"""
     translator_chain: Optional[str] = None
     """Output of one translator goes in another. Example: --translator-chain "google:JPN;sugoi:ENG"."""
     selective_translation: Optional[str] = None

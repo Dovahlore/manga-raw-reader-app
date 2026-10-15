@@ -160,6 +160,8 @@ class LibraryRepository(private val context: Context) {
                     hash = hash,
                     fingerprint = fingerprint(pages),
                     createdAt = System.currentTimeMillis(),
+                    titleChangedAt = System.currentTimeMillis(),
+                    modeChangedAt = System.currentTimeMillis(),
                 )
                 val index = readIndexData()
                 writeIndex(index.books + book, index.folders)
@@ -184,6 +186,7 @@ class LibraryRepository(private val context: Context) {
         val createdDirs = mutableListOf<File>()
         var success = false
         val results = mutableListOf<ImportResult>()
+        val createdBooks = mutableListOf<Book>()
         try {
             // 源文件先放内部缓存：SD 卡导入时避免“读 SD + 写 SD 源文件”同时竞争。
             val sourceHash = input.use {
@@ -230,10 +233,15 @@ class LibraryRepository(private val context: Context) {
                     fingerprint = fingerprint(pages),
                     cloudId = cloudId,
                     createdAt = System.currentTimeMillis(),
+                    titleChangedAt = System.currentTimeMillis(),
+                    modeChangedAt = System.currentTimeMillis(),
                 )
-                val index = readIndexData()
-                writeIndex(index.books + book, index.folders)
+                createdBooks += book
                 results += ImportResult(book, false, sourceHash)
+            }
+            if (createdBooks.isNotEmpty()) {
+                val index = readIndexData()
+                writeIndex(index.books + createdBooks, index.folders)
             }
             success = true
         } finally {
@@ -754,7 +762,10 @@ class LibraryRepository(private val context: Context) {
 
     suspend fun setMode(id: String, mode: ReadingMode) = withContext(Dispatchers.IO) {
         val d = readIndexData()
-        writeIndex(d.books.map { if (it.id == id) it.copy(mode = mode) else it }, d.folders)
+        writeIndex(
+            d.books.map { if (it.id == id) it.copy(mode = mode, modeChangedAt = System.currentTimeMillis()) else it },
+            d.folders,
+        )
     }
 
     // ---------------------------------------------------------------- 收藏夹
@@ -769,8 +780,12 @@ class LibraryRepository(private val context: Context) {
     }
 
     suspend fun createFolder(name: String): Folder = withContext(Dispatchers.IO) {
+        val trimmed = name.trim()
+        require(trimmed.isNotEmpty()) { "收藏夹名称不能为空" }
+        require(trimmed.length <= 80) { "收藏夹名称不能超过 80 字符" }
         val d = readIndexData()
-        val f = Folder(UUID.randomUUID().toString(), name.trim().ifBlank { "未命名" })
+        require(d.folders.none { it.name.equals(trimmed, ignoreCase = true) }) { "收藏夹已存在" }
+        val f = Folder(UUID.randomUUID().toString(), trimmed)
         writeIndex(d.books, d.folders + f)
         // 收藏夹列表也上云：失败（离线）不报错，下次 syncFoldersWithCloud 会补建
         runCatching { api.cloudFolderCreate(f.name) }
@@ -780,6 +795,9 @@ class LibraryRepository(private val context: Context) {
     suspend fun renameFolder(id: String, name: String) = withContext(Dispatchers.IO) {
         val d = readIndexData()
         val newName = name.trim()
+        require(newName.isNotEmpty()) { "收藏夹名称不能为空" }
+        require(newName.length <= 80) { "收藏夹名称不能超过 80 字符" }
+        require(d.folders.none { it.id != id && it.name.equals(newName, ignoreCase = true) }) { "收藏夹已存在" }
         val oldName = d.folders.find { it.id == id }?.name
         val now = System.currentTimeMillis()
         // 夹下每本书的归属名变了 → 时间戳 bump，批量同步会按 hash 推新名
@@ -813,6 +831,7 @@ class LibraryRepository(private val context: Context) {
     /** 把书移进/移出收藏夹。folderId 传 null 表示移到「未分类」。夹归属变化交给批量同步推。 */
     suspend fun moveBook(bookId: String, folderId: String?) = withContext(Dispatchers.IO) {
         val d = readIndexData()
+        require(folderId == null || d.folders.any { it.id == folderId }) { "收藏夹不存在" }
         writeIndex(
             d.books.map { if (it.id == bookId) it.copy(folderId = folderId, folderChangedAt = System.currentTimeMillis()) else it },
             d.folders,
@@ -866,7 +885,40 @@ class LibraryRepository(private val context: Context) {
         val t = title.trim()
         if (t.isBlank()) return@withContext
         val d = readIndexData()
-        writeIndex(d.books.map { if (it.id == bookId) it.copy(title = t) else it }, d.folders)
+        writeIndex(
+            d.books.map { if (it.id == bookId) it.copy(title = t, titleChangedAt = System.currentTimeMillis()) else it },
+            d.folders,
+        )
+    }
+
+    /** 拉回远端书名/模式（两个字段独立 LWW，只接受更新的时间戳）。 */
+    suspend fun applyIncomingBookMetadata(
+        bookId: String,
+        title: String?,
+        mode: String?,
+        titleChangedAt: Long,
+        modeChangedAt: Long,
+    ) = withContext(Dispatchers.IO) {
+        val d = readIndexData()
+        val current = d.books.find { it.id == bookId } ?: return@withContext
+        val nextTitle = title?.takeIf { it.isNotBlank() && titleChangedAt > current.titleChangedAt }
+        val nextMode = when {
+            mode == "normal" && modeChangedAt > current.modeChangedAt -> ReadingMode.NORMAL
+            mode == "manga" && modeChangedAt > current.modeChangedAt -> ReadingMode.MANGA
+            else -> null
+        }
+        if (nextTitle == null && nextMode == null) return@withContext
+        writeIndex(
+            d.books.map { book ->
+                if (book.id != bookId) book else book.copy(
+                    title = nextTitle ?: book.title,
+                    titleChangedAt = if (nextTitle != null) titleChangedAt else book.titleChangedAt,
+                    mode = nextMode ?: book.mode,
+                    modeChangedAt = if (nextMode != null) modeChangedAt else book.modeChangedAt,
+                )
+            },
+            d.folders,
+        )
     }
 
     // ---- 离线收藏夹补同步：移动/重命名/删除收藏夹时，对已同步书的云端 folder 变更先试一次，
@@ -900,8 +952,11 @@ class LibraryRepository(private val context: Context) {
     suspend fun drainFolderSyncs() = withContext(Dispatchers.IO) {
         val m = pendingFolderSyncs()
         if (m.isEmpty()) return@withContext
+        val cloudIds = runCatching { api.cloudList().map { it.id }.toSet() }.getOrNull()
+            ?: return@withContext
         val remaining = mutableMapOf<String, String>()
         for ((cloudId, name) in m) {
+            if (cloudId !in cloudIds) continue
             val folder = name.takeIf { it.isNotBlank() }
             val ok = runCatching { api.cloudUpdateFolder(cloudId, folder) }.getOrDefault(false)
             if (!ok) remaining[cloudId] = name
@@ -995,6 +1050,9 @@ class LibraryRepository(private val context: Context) {
                 hash = book.hash.ifBlank { sha256(epubFile(book.id)) },
                 fingerprint = book.fingerprint,
                 pageCount = book.pageCount,
+                titleChangedAt = book.titleChangedAt,
+                modeChangedAt = book.modeChangedAt,
+                folderChangedAt = book.folderChangedAt,
                 oldBookId = book.serverId,   // 先翻译后同步：旧译文在 serverId（本地书=hash）下，迁到云端 id
                 onProgress = { sent, total -> onProgress?.invoke("上传中…", if (total > 0) sent.toFloat() / total else null) },
             )
@@ -1043,6 +1101,8 @@ class LibraryRepository(private val context: Context) {
                     folders0,
                 )
             }
+            applyIncomingBookMetadata(
+                existing.id, cloud.title, cloud.mode, cloud.titleChangedAt, cloud.modeChangedAt)
             return@withContext readIndexData().books.find { it.id == existing.id }
                 ?: existing.copy(cloudId = cloud.id, folderId = fid)
         }
@@ -1056,6 +1116,9 @@ class LibraryRepository(private val context: Context) {
         var title = cloud.title
         var mode = ReadingMode.MANGA
         var folderName: String? = cloud.folder
+        var titleChangedAt = cloud.titleChangedAt
+        var modeChangedAt = cloud.modeChangedAt
+        var completed = false
         try {
             api.cloudDownload(cloud.id, zipFile) { got, total ->
                 onProgress?.invoke("下载中…", if (total > 0) got.toFloat() / total else null)
@@ -1068,6 +1131,8 @@ class LibraryRepository(private val context: Context) {
                     title = m.optString("title").takeIf { it.isNotBlank() } ?: title
                     mode = if (m.optString("mode") == "normal") ReadingMode.NORMAL else ReadingMode.MANGA
                     folderName = m.optString("folder").takeIf { it.isNotBlank() } ?: folderName
+                    if (m.optLong("title_changed_at", 0L) > 0L) titleChangedAt = m.optLong("title_changed_at", 0L)
+                    if (m.optLong("mode_changed_at", 0L) > 0L) modeChangedAt = m.optLong("mode_changed_at", 0L)
                 }
                 for (e in zip.entries()) {
                     if (e.isDirectory) continue
@@ -1082,8 +1147,13 @@ class LibraryRepository(private val context: Context) {
                     }
                 }
             }
+            completed = true
         } finally {
             zipFile.delete()   // 成功/失败/取消都删，避免遗留大 zip 占空间
+            if (!completed) {
+                dir.deleteRecursively()
+                translatedDir.deleteRecursively()
+            }
         }
 
         val pages = pagesDir.listFiles { f -> f.isFile }?.sortedBy { it.name } ?: emptyList()
@@ -1109,6 +1179,8 @@ class LibraryRepository(private val context: Context) {
             cloudId = cloud.id,
             hash = hash,
             fingerprint = fp,
+            titleChangedAt = titleChangedAt,
+            modeChangedAt = modeChangedAt,
         )
 
         // 译文不打进 zip：用服务端页状态补拉（写 sync_meta 指纹，避免下次同步/打开书重复下载）
@@ -1202,6 +1274,8 @@ class LibraryRepository(private val context: Context) {
                 put("page_count", book.pageCount)
                 put("hash", book.hash)
                 put("fingerprint", book.fingerprint)
+                if (book.titleChangedAt > 0L) put("title_changed_at", book.titleChangedAt)
+                if (book.modeChangedAt > 0L) put("mode_changed_at", book.modeChangedAt)
                 folderName?.takeIf { it.isNotBlank() }?.let { put("folder", it) }
             }
             zos.putNextEntry(ZipEntry("manifest.json"))
@@ -1374,6 +1448,8 @@ class LibraryRepository(private val context: Context) {
             put("pageCount", book.pageCount)
             put("hash", book.hash)
             put("fingerprint", book.fingerprint)
+            if (book.titleChangedAt > 0L) put("title_changed_at", book.titleChangedAt)
+            if (book.modeChangedAt > 0L) put("mode_changed_at", book.modeChangedAt)
             put("orderDir", if (book.mode == ReadingMode.MANGA) "rtl" else "ltr")
             folderName?.takeIf { it.isNotBlank() }?.let { put("folder", it) }
             progress?.let { put("readingProgress", JSONObject().apply { put("page", it.page); put("lastReadAt", it.lastReadAt) }) }
@@ -1416,6 +1492,13 @@ class LibraryRepository(private val context: Context) {
                         }
                     }
                     applyIncomingProgress(existing.id, m)
+                    applyIncomingBookMetadata(
+                        existing.id,
+                        title,
+                        m.optString("mode"),
+                        m.optLong("title_changed_at", 0L),
+                        m.optLong("mode_changed_at", 0L),
+                    )
                     return@withPermit TransferImportResult(existing, true, added, translatedArr.length() - added)
                 }
 
@@ -1465,6 +1548,8 @@ class LibraryRepository(private val context: Context) {
                         hash = hash.ifBlank { sha256OfPages(pages) },
                         fingerprint = m.optString("fingerprint").ifBlank { fingerprint(pages) },
                         createdAt = System.currentTimeMillis(),
+                        titleChangedAt = m.optLong("title_changed_at", 0L),
+                        modeChangedAt = m.optLong("mode_changed_at", 0L),
                     )
                     writeIndex(d.books + book, folders)
                     applyIncomingProgress(id, m)
@@ -1531,6 +1616,8 @@ class LibraryRepository(private val context: Context) {
                 hash = o.optString("hash", ""),
                 fingerprint = o.optString("fingerprint", ""),
                 createdAt = o.optLong("created_at", 0L),
+                titleChangedAt = o.optLong("title_changed_at", 0L),
+                modeChangedAt = o.optLong("mode_changed_at", 0L),
             )
         }
         return out
@@ -1550,6 +1637,8 @@ class LibraryRepository(private val context: Context) {
                 if (b.hash.isNotEmpty()) put("hash", b.hash)
                 if (b.fingerprint.isNotEmpty()) put("fingerprint", b.fingerprint)
                 put("created_at", b.createdAt)
+                if (b.titleChangedAt > 0L) put("title_changed_at", b.titleChangedAt)
+                if (b.modeChangedAt > 0L) put("mode_changed_at", b.modeChangedAt)
             })
         }
         obj.put("books", barr)

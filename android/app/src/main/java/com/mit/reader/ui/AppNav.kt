@@ -25,6 +25,7 @@ sealed class Route(val path: String) {
     data object Reader : Route("reader/{bookId}") {
         fun of(bookId: String) = "reader/$bookId"
     }
+    data object RemoteController : Route("remote-controller")
 }
 
 private enum class FullScreenOverlay { Settings, Kmoe }
@@ -59,11 +60,18 @@ fun AppNav() {
                     },
                     onSettings = { overlay = FullScreenOverlay.Settings },
                     onKmoe = { overlay = FullScreenOverlay.Kmoe },
+                    onRemoteControl = {
+                        overlay = null
+                        nav.navigate(Route.RemoteController.path) { launchSingleTop = true }
+                    },
                 )
             }
             composable(Route.Reader.path) { backStack ->
                 val bookId = backStack.arguments?.getString("bookId") ?: return@composable
                 ReaderScreen(bookId = bookId, onBack = { nav.popBackStack() })
+            }
+            composable(Route.RemoteController.path) {
+                RemoteControlScreen(onBack = { nav.popBackStack() })
             }
         }
         when (overlay) {

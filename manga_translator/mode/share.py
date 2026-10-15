@@ -79,7 +79,7 @@ class MangaShare:
         params = dict(params or {})
         # 让“网页/API”这条路也能启用跨页上下文：
         # --context-size 是 CLI 参数，server/main.py 启动 worker 时不会传，所以用环境变量补。
-        # 在容器里设 MIT_CONTEXT_SIZE=1 即表示“翻译每一页时带上前一页作为参考”。
+        # 在容器里设 MIT_CONTEXT_SIZE=3 即表示“翻译每一页时带上前三页作为参考”。
         if 'context_size' not in params:
             _cs = os.environ.get('MIT_CONTEXT_SIZE')
             if _cs:

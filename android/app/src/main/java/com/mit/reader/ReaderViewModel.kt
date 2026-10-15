@@ -9,7 +9,9 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.mit.reader.data.Book
+import com.mit.reader.data.ServerConfig
 import com.mit.reader.data.serverId
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.Job
@@ -42,6 +44,7 @@ class ReaderViewModel(private val app: Application) : AndroidViewModel(app) {
 
     private val pages: List<File> get() = book?.pageFiles ?: emptyList()
     private var watchJob: Job? = null
+    private var restoreJob: Job? = null
 
     fun load(b: Book) {
         book = b
@@ -60,6 +63,27 @@ class ReaderViewModel(private val app: Application) : AndroidViewModel(app) {
         // 打开阅读器时从服务端补拉译文页（所有书都拉：同步书别的设备新翻的、非同步书服务端已翻好的都补齐）。
         // 只补本地缺的/指纹变了的，不全量。
         refreshFromServer()
+        restoreJob?.cancel()
+        restoreJob = viewModelScope.launch {
+            val activePages = try {
+                readerApp.activePageJobs(b)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                emptyList()
+            }
+            if (book?.id == b.id) {
+                activePages.forEach { index ->
+                    if (index in b.pageFiles.indices) {
+                        pageStates[index] = PageState(
+                            status = PageStatus.RUNNING,
+                            translatedFile = readerApp.library.translatedCacheFile(b.id, index)
+                                .takeIf { it.exists() && it.length() > 0L },
+                        )
+                    }
+                }
+            }
+        }
         // 事件驱动：后台「全书翻译」每下好一页就发事件，这里按书过滤、更新 pageStates（免轮询）
         watchJob?.cancel()
         watchJob = viewModelScope.launch {
@@ -74,7 +98,12 @@ class ReaderViewModel(private val app: Application) : AndroidViewModel(app) {
             launch {
                 readerApp.pageTranslationFailed.collect { (bookId, pageIndex, error) ->
                     if (bookId == b.id && pageIndex in b.pageFiles.indices) {
-                        pageStates[pageIndex] = PageState(status = PageStatus.FAILED, error = error)
+                        val cachedFile = readerApp.library.translatedCacheFile(b.id, pageIndex)
+                        pageStates[pageIndex] = PageState(
+                            status = PageStatus.FAILED,
+                            translatedFile = cachedFile.takeIf { it.exists() && it.length() > 0L },
+                            error = error,
+                        )
                     }
                 }
             }
@@ -101,30 +130,50 @@ class ReaderViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     fun toggleOriginal() {
-        if (pageStates[currentPage]?.status == PageStatus.DONE) {
+        if (pageStates[currentPage]?.translatedFile != null) {
             showOriginal = !showOriginal
         }
     }
 
     /** 当前页手动翻译；已翻过则强制重翻（force=true）。 */
     fun translateCurrent() {
-        val done = pageStates[currentPage]?.status == PageStatus.DONE
-        translatePage(currentPage, force = done)
+        val state = pageStates[currentPage]
+        val done = state?.status == PageStatus.DONE || state?.translatedFile != null
+        showOriginal = false
+        translatePage(currentPage, force = done, manual = true)
     }
 
     /** 自动预翻：当前页及其后 3 页（含当前页没翻过的）。 */
     fun prefetchAfter(fromIndex: Int) {
+        if (fromIndex !in pages.indices) return
+        if (!ServerConfig.isTranslationConfigured()) {
+            if (pageStates[fromIndex]?.status == PageStatus.IDLE) translatePage(fromIndex)
+            return
+        }
         for (i in fromIndex until minOf(fromIndex + 4, pages.size)) {
-            translatePage(i)
+            if (pageStates[i]?.status == PageStatus.IDLE) translatePage(i)
         }
     }
 
-    private fun translatePage(index: Int, force: Boolean = false) {
+    private fun translatePage(index: Int, force: Boolean = false, manual: Boolean = false) {
         val b = book ?: return
         if (index !in pages.indices) return
-        if (pageStates[index]?.status == PageStatus.RUNNING) return          // 已在跑
-        if (!force && pageStates[index]?.status == PageStatus.DONE) return   // 已翻过
-        pageStates[index] = PageState(status = PageStatus.RUNNING)
+        val previous = pageStates[index]
+        if (previous?.status == PageStatus.RUNNING) return
+        if (!manual && previous?.status != PageStatus.IDLE) return
+        if (!force && previous?.status == PageStatus.DONE) return
+        val startedAt = System.currentTimeMillis()
+        val preservedFile = if (force || manual) previous?.translatedFile else null
+        pageStates[index] = PageState(status = PageStatus.RUNNING, translatedFile = preservedFile)
+        viewModelScope.launch {
+            while (pageStates[index]?.status == PageStatus.RUNNING) {
+                delay(2_000)
+                val cachedFile = readerApp.library.translatedCacheFile(b.id, index)
+                if (cachedFile.exists() && cachedFile.length() > 0 && cachedFile.lastModified() >= startedAt) {
+                    pageStates[index] = PageState(status = PageStatus.DONE, translatedFile = cachedFile)
+                }
+            }
+        }
         readerApp.translateBookPage(b, index, force)
     }
 }

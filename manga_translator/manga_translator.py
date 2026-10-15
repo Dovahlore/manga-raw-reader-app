@@ -967,8 +967,9 @@ class MangaTranslator:
             return ""
 
         # 筛选出有句子的页面
+        indexed_pages = list(enumerate(available_pages))
         non_empty_pages = [
-            page for page in available_pages
+            (page_number, page) for page_number, page in indexed_pages
             if any(sent.strip() for sent in page.values())
         ]
         # 实际要用的页数
@@ -976,31 +977,24 @@ class MangaTranslator:
         if pages_used == 0:
             return ""
         tail = non_empty_pages[-pages_used:]
-
-        # 拼接 - 根据参数决定使用原文还是译文
-        lines = []
-        for page in tail:
-            for sent in page.values():
-                if sent.strip():
-                    lines.append(sent.strip())
-
-        # 如果使用原文，需要从原始数据中获取
-        if use_original_text and hasattr(self, '_original_page_texts'):
-            # 尝试获取对应的原文
-            original_lines = []
-            for i, page in enumerate(tail):
-                page_idx = available_pages.index(page)
-                if page_idx < len(self._original_page_texts):
-                    original_page = self._original_page_texts[page_idx]
-                    for sent in original_page.values():
-                        if sent.strip():
-                            original_lines.append(sent.strip())
-            if original_lines:
-                lines = original_lines
-
-        numbered = [f"<|{i+1}|>{s}" for i, s in enumerate(lines)]
+        sections = []
+        for page_number, page in tail:
+            source_page = page
+            if use_original_text and hasattr(self, '_original_page_texts') and page_number < len(self._original_page_texts):
+                source_page = self._original_page_texts[page_number]
+            page_lines = [sent.strip() for sent in source_page.values() if sent.strip()]
+            if page_lines:
+                sections.append(f"[Previous page | page_number={page_number}]\n" + "\n".join(f"- {line}" for line in page_lines))
         context_type = "original text" if use_original_text else "translation results"
-        return f"Here are the previous {context_type} for reference:\n" + "\n".join(numbered)
+        if not sections:
+            return ""
+        return (
+            f"Here are previous-page {context_type} for reference. "
+            "Each [Previous page] block is one separate page; keep pages and lines separate and do not merge them:\n\n"
+            + "\n\n".join(sections)
+        )
+
+
 
     async def _dispatch_with_context(self, config: Config, texts: list[str], ctx: Context):
         # 计算实际要使用的上下文页数和跳过的空页数

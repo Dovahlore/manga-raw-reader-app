@@ -46,11 +46,24 @@ class CustomOpenAiTranslator(GlossaryMixin, ConfigGPT, CommonTranslator):
         self.init_glossary()
         self.client = openai.AsyncOpenAI(api_key=api_key or CUSTOM_OPENAI_API_KEY or "ollama") # required, but unused for ollama
         self.client.base_url = api_base or CUSTOM_OPENAI_API_BASE
+        self._runtime_auth = (self.client.base_url, api_key or CUSTOM_OPENAI_API_KEY or "ollama")
         self.token_count = 0
         self.token_count_last = 0
 
     def parse_args(self, args: TranslatorConfig):
         self.config = args.chatgpt_config
+        self.model = args.model or self.model or CUSTOM_OPENAI_MODEL
+        api_base = args.api_base or CUSTOM_OPENAI_API_BASE
+        api_key = args.api_key or CUSTOM_OPENAI_API_KEY or "ollama"
+        runtime_auth = (str(api_base).rstrip("/") + "/", api_key)
+        if runtime_auth != self._runtime_auth:
+            old_client = self.client
+            self.client = openai.AsyncOpenAI(api_key=api_key, base_url=runtime_auth[0])
+            self._runtime_auth = runtime_auth
+            try:
+                asyncio.get_running_loop().create_task(old_client.close())
+            except RuntimeError:
+                pass
 
 
     def extract_capture_groups(self, text, regex=r"(.*)"):
@@ -148,14 +161,19 @@ class CustomOpenAiTranslator(GlossaryMixin, ConfigGPT, CommonTranslator):
                 try:
                     response = await request_task
                     break
-                except openai.RateLimitError:  # Server returned ratelimit response
+                except openai.RateLimitError as e:
+                    if any(marker in str(e).lower() for marker in ("insufficient", "balance", "quota", "billing")):
+                        raise
                     ratelimit_attempt += 1
                     if ratelimit_attempt >= self._RATELIMIT_RETRY_ATTEMPTS:
                         raise
                     self.logger.warning(
                         f'Restarting request due to ratelimiting by Ollama servers. Attempt: {ratelimit_attempt}')
                     await asyncio.sleep(2)
-                except openai.APIError:  # Server returned 500 error (probably server load)
+                except openai.APIError as e:
+                    status_code = getattr(e, "status_code", None)
+                    if status_code in (400, 401, 402, 403, 404, 422):
+                        raise
                     server_error_attempt += 1
                     if server_error_attempt >= self._RETRY_ATTEMPTS:
                         self.logger.error(
@@ -168,7 +186,9 @@ class CustomOpenAiTranslator(GlossaryMixin, ConfigGPT, CommonTranslator):
             
 
             # Use regex to extract response 
-            response=self.extract_capture_groups(response, rf"{self.rgx_capture}")
+            response = self.extract_capture_groups(response, rf"{self.rgx_capture}")
+            if response is None:
+                raise Exception('translation model returned no numbered translations')
 
 
             # Sometimes it will return line like "<|9>demo", and we need to fix it.
@@ -236,20 +256,28 @@ class CustomOpenAiTranslator(GlossaryMixin, ConfigGPT, CommonTranslator):
 
         messages.append({'role': 'user', 'content': prompt})
 
+        request_kwargs = {}
+        if "deepseek.com" in str(self.client.base_url).lower():
+            request_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
         response = await self.client.chat.completions.create(
             model=self.model or CUSTOM_OPENAI_MODEL,
             messages=messages,
-            max_tokens=self._MAX_TOKENS // 2,
+            max_tokens=self._MAX_TOKENS * 2,
             temperature=self.temperature,
             top_p=self.top_p,
+            **request_kwargs,
         )
+        choice = response.choices[0]
+        content = choice.message.content
+        if not content or not content.strip():
+            raise Exception(
+                f'translation model returned empty content (finish_reason={choice.finish_reason})')
 
         self.logger.debug('\n-- GPT Response (raw) --')
-        self.logger.debug(response.choices[0].message.content)
+        self.logger.debug(content)
         self.logger.debug('------------------------\n')
-
-
-        self.token_count += response.usage.total_tokens
-        self.token_count_last = response.usage.total_tokens
-
-        return response.choices[0].message.content
+        usage = getattr(response, 'usage', None)
+        if usage and usage.total_tokens:
+            self.token_count += usage.total_tokens
+            self.token_count_last = usage.total_tokens
+        return content

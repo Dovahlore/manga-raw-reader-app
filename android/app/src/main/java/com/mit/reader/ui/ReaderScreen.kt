@@ -2,6 +2,7 @@ package com.mit.reader.ui
 
 import android.os.SystemClock
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
@@ -17,11 +18,13 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -32,7 +35,9 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -57,15 +62,21 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
+import coil.request.ImageRequest
 import com.mit.reader.PageStatus
 import com.mit.reader.ReaderApp
 import com.mit.reader.ReaderViewModel
 import com.mit.reader.data.ReadingMode
+import com.mit.reader.data.RemotePageAction
+import com.mit.reader.data.RemoteReaderSnapshot
+import com.mit.reader.data.RemoteReaderCommandHandler
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
@@ -80,6 +91,11 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
     val vm: ReaderViewModel = viewModel()
     val app = LocalContext.current.applicationContext as ReaderApp
     val scope = rememberCoroutineScope()
+
+    DisposableEffect(Unit) {
+        app.updateReaderScreenActive(true)
+        onDispose { app.updateReaderScreenActive(false) }
+    }
 
     LaunchedEffect(bookId) {
         app.library.book(bookId)?.let(vm::load)
@@ -105,10 +121,37 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
         pageCount = { book.pageCount },
     )
 
+    val volumeAndRemoteHandler = remember(book, pagerState) {
+        RemoteReaderCommandHandler { action ->
+            val target = (vm.currentPage + if (action == RemotePageAction.NEXT) 1 else -1)
+                .coerceIn(0, book.pageCount - 1)
+            vm.setPage(target)
+            app.recordReadingProgress(book, target)
+            scope.launch { pagerState.scrollToPage(target) }
+            RemoteReaderSnapshot(book.id, book.title, target, book.pageCount)
+        }
+    }
+    DisposableEffect(book.id, volumeAndRemoteHandler) {
+        app.remoteControl.registerReader(
+            bookId = book.id,
+            title = book.title,
+            pageCount = book.pageCount,
+            currentPage = pagerState.currentPage,
+            handler = volumeAndRemoteHandler,
+        )
+        onDispose { app.remoteControl.unregisterReader(volumeAndRemoteHandler) }
+    }
+
     LaunchedEffect(pagerState.currentPage) {
         vm.setPage(pagerState.currentPage)
         // 记录阅读进度（本地 + 云端书防抖推后端，跨设备同步）
         app.recordReadingProgress(book, pagerState.currentPage)
+        app.remoteControl.updateReader(
+            bookId = book.id,
+            title = book.title,
+            page = pagerState.currentPage,
+            pageCount = book.pageCount,
+        )
     }
 
     val st = vm.pageStates[vm.currentPage]
@@ -117,6 +160,9 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
     // UI 自动隐藏：显示后 3 秒无操作自动隐藏；点空白区域切换显隐
     var uiVisible by remember { mutableStateOf(true) }
     var uiTick by remember { mutableIntStateOf(0) }
+    var remoteDialogOpen by remember { mutableStateOf(false) }
+    var bottomMenuHeight by remember { mutableStateOf(72.dp) }
+    val density = LocalDensity.current
     fun keepUiAlive() { uiTick++ }
     var sliderValue by remember { mutableFloatStateOf(vm.currentPage.toFloat()) }
     LaunchedEffect(pagerState.currentPage) {
@@ -137,21 +183,42 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
         ) { i ->
             val pageState = vm.pageStates[i]
             // 已翻好的页直接展示译文（翻页不再先闪一下原图）；仅「当前页 + 手动切原图」时显示原图
-            val show = pageState?.status == PageStatus.DONE &&
+            val show = pageState?.translatedFile != null &&
                 !(i == vm.currentPage && vm.showOriginal)
             val file = if (show) pageState?.translatedFile else book.pageFiles[i]
             ZoomableImage(
                 model = file,
+                imageCacheKey = file?.let { "${it.absolutePath}:${it.length()}:${it.lastModified()}" },
                 contentDescription = "第 ${i + 1} 页",
-                onImageTap = { vm.toggleOriginal() },
-                onEmptyTap = {
+                onImageTap = {
+                    if (uiVisible) {
+                        uiVisible = false
+                    } else {
+                        vm.toggleOriginal()
+                    }
+                },
+                onMenuTap = {
                     uiVisible = !uiVisible
                     uiTick++
                 },
+                menuZoneHeight = bottomMenuHeight,
                 pagerState = pagerState,
                 reverseLayout = book.mode == ReadingMode.MANGA,
                 pageCount = book.pageCount,
                 modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        vm.pageStates[vm.currentPage]?.takeIf { it.status == PageStatus.FAILED }?.let { state ->
+            Text(
+                "翻译失败：${state.error?.take(240) ?: "未知错误"}",
+                color = Color.White,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 92.dp)
+                    .background(Color.Black.copy(alpha = 0.65f))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
             )
         }
 
@@ -163,6 +230,7 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                     .fillMaxWidth()
                     .background(Color.Black.copy(alpha = 0.35f))
                     .statusBarsPadding()
+                    .clickable { uiVisible = false; uiTick++ }
                     .padding(horizontal = 4.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -174,6 +242,24 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                     color = Color.White,
                     style = MaterialTheme.typography.labelMedium,
                 )
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = { keepUiAlive(); remoteDialogOpen = true }) {
+                    Text("遥控", color = Color.White, style = MaterialTheme.typography.labelMedium)
+                }
+                TextButton(
+                    onClick = {
+                        keepUiAlive()
+                        val nextMode = if (book.mode == ReadingMode.MANGA) ReadingMode.NORMAL else ReadingMode.MANGA
+                        app.setLibraryBookMode(book.id, nextMode)
+                        vm.load(book.copy(mode = nextMode))
+                    },
+                ) {
+                    Text(
+                        if (book.mode == ReadingMode.MANGA) "日漫" else "普通",
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
             }
 
             // 底部：跳页 + 自动翻译 + 翻译（半透明悬浮，避开底部手势条）
@@ -183,6 +269,10 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                     .fillMaxWidth()
                     .background(Color.Black.copy(alpha = 0.35f))
                     .navigationBarsPadding()
+                    .onGloballyPositioned {
+                        with(density) { bottomMenuHeight = it.size.height.toDp() }
+                    }
+                    .clickable { uiVisible = false; uiTick++ }
                     .padding(horizontal = 12.dp, vertical = 6.dp),
             ) {
                 if (book.pageCount > 1) {
@@ -197,25 +287,56 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                         valueRange = 0f..(book.pageCount - 1).toFloat(),
                     )
                 }
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("自动", color = Color.White, style = MaterialTheme.typography.labelMedium)
-                    Switch(
-                        checked = vm.autoMode,
-                        onCheckedChange = { vm.setAuto(it); keepUiAlive() },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = Color.White,
-                            checkedTrackColor = Color.White.copy(alpha = 0.5f),
-                            uncheckedThumbColor = Color.White.copy(alpha = 0.8f),
-                            uncheckedTrackColor = Color.White.copy(alpha = 0.25f),
-                        ),
-                    )
-                    Spacer(Modifier.weight(1f))
+                // 底行三段布局：自动（左）· 遥控器信息（中，仅已连接时显示）· 翻译按钮（右）。
+                // 未连接遥控器时中间留空，自动/翻译仍钉在左右两侧，位置不随连接状态漂移。
+                Box(Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.align(Alignment.CenterStart),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("自动", color = Color.White, style = MaterialTheme.typography.labelMedium)
+                        Switch(
+                            checked = vm.autoMode,
+                            onCheckedChange = { vm.setAuto(it); keepUiAlive() },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = Color.White.copy(alpha = 0.5f),
+                                uncheckedThumbColor = Color.White.copy(alpha = 0.8f),
+                                uncheckedTrackColor = Color.White.copy(alpha = 0.25f),
+                            ),
+                        )
+                    }
+                    app.remoteControl.connectedControllerName?.let { controllerName ->
+                        if (RemoteControlUi.acceptedControllerName == controllerName) {
+                            Text(
+                                "退出被遥控",
+                                color = Color.White,
+                                style = MaterialTheme.typography.labelMedium,
+                                modifier = Modifier
+                                    .align(Alignment.Center)
+                                    .clickable {
+                                        app.disconnectRemoteHostController()
+                                        keepUiAlive()
+                                    }
+                                    .padding(horizontal = 8.dp),
+                            )
+                        } else {
+                            Text(
+                                "遥控 · $controllerName",
+                                color = Color.White,
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .align(Alignment.Center)
+                                    .widthIn(max = 120.dp),
+                            )
+                        }
+                    }
                     Button(
                         onClick = { keepUiAlive(); vm.translateCurrent() },
                         enabled = status != PageStatus.RUNNING,
+                        modifier = Modifier.align(Alignment.CenterEnd),
                     ) {
                         when (status) {
                             PageStatus.RUNNING -> {
@@ -233,20 +354,72 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                 }
             }
         }
+
+        if (!uiVisible) {
+            app.remoteControl.connectedControllerName?.let { controllerName ->
+                Text(
+                    "遥控 · $controllerName",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .statusBarsPadding()
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                        .background(Color.Black.copy(alpha = 0.35f)),
+                )
+            }
+        }
+    }
+
+    if (remoteDialogOpen) {
+        AlertDialog(
+            onDismissRequest = { remoteDialogOpen = false },
+            title = { Text("遥控器模式") },
+            text = {
+                Column(verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp)) {
+                app.localTransferEndpoint()?.let {
+                    Text("地址：$it", style = MaterialTheme.typography.bodyMedium)
+                }
+                Text(
+                    "配对与配对码在「书库 · 设备」页；遥控请求到达时本机会弹窗确认，接受后才会被遥控。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                    app.remoteControl.connectedControllerName?.let {
+                        Text("已连接：$it", style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { remoteDialogOpen = false }) { Text("关闭") }
+            },
+            dismissButton = app.remoteControl.connectedControllerName?.let {
+                {
+                    TextButton(
+                        onClick = {
+                            app.disconnectRemoteHostController()
+                            remoteDialogOpen = false
+                        },
+                    ) { Text("断开") }
+                }
+            },
+        )
     }
 }
 
 /**
  * 可缩放的图片：
  * - 双指捏合放大/缩小，放大后单指拖动平移（1x 下单指横滑仍留给 pager 翻页）
- * - 单击 → 切换原文/译文；双击 → 放大 / 恢复原始大小
+ * - 点图片本体：单击 → 切换原文/译文；双击 → 放大 / 恢复原始大小
+ * - 点底部菜单条或图片未覆盖的屏幕区域（留白/黑边）→ 召唤/收起菜单
  */
 @Composable
 private fun ZoomableImage(
     model: Any?,
+    imageCacheKey: Any?,
     contentDescription: String?,
     onImageTap: () -> Unit,
-    onEmptyTap: () -> Unit,
+    onMenuTap: () -> Unit,
+    menuZoneHeight: Dp,
     pagerState: PagerState,
     reverseLayout: Boolean,
     pageCount: Int,
@@ -273,13 +446,21 @@ private fun ZoomableImage(
     val viewConfig = LocalViewConfiguration.current
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
+    val context = LocalContext.current
+    val imageRequest = remember(model, imageCacheKey) {
+        ImageRequest.Builder(context)
+            .data(model)
+            .memoryCacheKey(imageCacheKey?.toString())
+            .diskCacheKey(imageCacheKey?.toString())
+            .build()
+    }
 
     // 单击/双击判定：单击延迟到双击超时后再触发，双击放大
     var tapSeq by remember { mutableIntStateOf(0) }
     var lastTapAt by remember { mutableLongStateOf(0L) }
     var pendingSingleTap by remember { mutableStateOf(false) }
     val currentOnImageTap by rememberUpdatedState(onImageTap)
-    val currentOnEmptyTap by rememberUpdatedState(onEmptyTap)
+    val currentOnMenuTap by rememberUpdatedState(onMenuTap)
 
     fun toggleZoom() {
         scale.floatValue = if (scale.floatValue > 1f) 1f else DOUBLE_TAP_ZOOM
@@ -395,14 +576,17 @@ private fun ZoomableImage(
 
                     // 单指、几乎没移动 → 判定为一次点击
                     if (maxPointers == 1 && totalMove < viewConfig.touchSlop) {
-                        if (isOnImage(downPos)) {
-                            // 点图片：双击放大 / 单击切换译文原图
-                            currentRegisterTap(downPos)
-                        } else {
-                            // 点空白区域：切换 UI 显隐
+                        val menuZonePx = with(density) { menuZoneHeight.toPx() }
+                        val inMenuZone = viewport.value.height > 0 &&
+                            downPos.y >= viewport.value.height - menuZonePx
+                        // 召唤菜单热区 = 底部菜单条 + 图片未覆盖的屏幕区域（两侧/上下留白）；
+                        // 点在图片本体上仍是双击放大 / 单击切换原文译文
+                        if (inMenuZone || !isOnImage(downPos)) {
                             pendingSingleTap = false
                             lastTapAt = 0L
-                            currentOnEmptyTap()
+                            currentOnMenuTap()
+                        } else {
+                            currentRegisterTap(downPos)
                         }
                     }
 
@@ -445,7 +629,7 @@ private fun ZoomableImage(
         // 而不是对整屏盒子做变换——这样放大后图片直接铺满屏幕（无黑边），
         // 平移范围也按图片实际尺寸算，拖动 1:1 跟手。
         AsyncImage(
-            model = model,
+            model = imageRequest,
             contentDescription = contentDescription,
             contentScale = ContentScale.Fit,
             onState = { state ->

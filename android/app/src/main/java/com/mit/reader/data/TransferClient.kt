@@ -3,6 +3,7 @@ package com.mit.reader.data
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.Looper
 import okhttp3.MediaType.Companion.toMediaType
@@ -22,10 +23,13 @@ import java.util.concurrent.TimeUnit
  */
 class TransferClient(
     context: Context,
+    private val ownDeviceId: String,
     private val onDeviceFound: (DiscoveredDevice) -> Unit,
     private val onDiscoveryStopped: () -> Unit,
 ) {
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
+    private val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+    private val multicastLock = wifiManager.createMulticastLock("mit:discovery").apply { setReferenceCounted(false) }
     private val mainHandler = Handler(Looper.getMainLooper())
     private val devices = LinkedHashMap<String, DiscoveredDevice>()
     private val client = OkHttpClient.Builder()
@@ -38,6 +42,8 @@ class TransferClient(
         override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {}
         override fun onServiceResolved(info: NsdServiceInfo) {
             val host = info.host?.hostAddress ?: return
+            // 发现的是自己：服务方在 TXT 记录里广播了设备 ID
+            if (info.attributes[NSD_KEY_DEVICE_ID]?.toString(Charsets.UTF_8) == ownDeviceId) return
             if (devices.containsKey(info.serviceName)) return
             val d = DiscoveredDevice(info.serviceName, host, info.port)
             devices[info.serviceName] = d
@@ -55,6 +61,7 @@ class TransferClient(
         }
         override fun onServiceLost(info: NsdServiceInfo) { devices.remove(info.serviceName) }
         override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+            runCatching { if (multicastLock.isHeld) multicastLock.release() }
             mainHandler.post { onDiscoveryStopped() }
         }
         override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
@@ -62,14 +69,20 @@ class TransferClient(
 
     fun startDiscovery() {
         devices.clear()
+        runCatching { if (!multicastLock.isHeld) multicastLock.acquire() }
         runCatching { nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener) }
+            .onFailure { runCatching { if (multicastLock.isHeld) multicastLock.release() } }
     }
 
-    fun stopDiscovery() = runCatching { nsdManager.stopServiceDiscovery(discoveryListener) }
+    fun stopDiscovery() {
+        runCatching { nsdManager.stopServiceDiscovery(discoveryListener) }
+        runCatching { if (multicastLock.isHeld) multicastLock.release() }
+    }
 
     /** 发送一本书。onStage 阶段文案；onProgress 已发字节/总字节。返回接收方回报的导入结果 JSON（无则 null）。 */
     fun send(
         device: DiscoveredDevice,
+        token: String,
         manifestJson: String,
         files: List<TransferFileEntry>,
         onStage: (String) -> Unit,
@@ -77,7 +90,7 @@ class TransferClient(
     ): JSONObject {
         val base = "http://${device.host}:${device.port}"
         onStage("正在建立会话…")
-        val plan = postSession(base, manifestJson)
+        val plan = postSession(base, token, manifestJson)
         if (plan.optBoolean("existed", false)) {
             throw PeerHasBookException()
         }
@@ -92,27 +105,30 @@ class TransferClient(
         var sent = 0L
 
         toSend.forEach { entry ->
-            val offset = getOffset(base, sessionId, entry.relPath)
+            val offset = getOffset(base, token, sessionId, entry.relPath)
             if (offset >= entry.size) {
                 sent += entry.size
                 onProgress(sent, totalBytes)
                 return@forEach
             }
-            putFile(base, sessionId, entry, offset) { delta ->
+            putFile(base, token, sessionId, entry, offset) { delta ->
                 sent += delta
                 onProgress(sent, totalBytes)
             }
         }
 
         onStage("正在校验并导入…")
-        val result = postComplete(base, sessionId)
+        val result = postComplete(base, token, sessionId)
         onProgress(totalBytes, totalBytes)
         return result
     }
 
-    private fun postSession(base: String, manifestJson: String): JSONObject {
+    private fun postSession(base: String, token: String, manifestJson: String): JSONObject {
         val body = manifestJson.toRequestBody("application/json".toMediaType())
-        val req = Request.Builder().url("$base/session").post(body).build()
+        val req = Request.Builder().url("$base/session")
+            .header("Authorization", "Bearer $token")
+            .post(body)
+            .build()
         client.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) throw IllegalStateException("会话建立失败 HTTP ${resp.code}: ${text.take(200)}")
@@ -120,8 +136,11 @@ class TransferClient(
         }
     }
 
-    private fun getOffset(base: String, sessionId: String, relPath: String): Long {
-        val req = Request.Builder().url("$base/files/$sessionId/$relPath/offset").get().build()
+    private fun getOffset(base: String, token: String, sessionId: String, relPath: String): Long {
+        val req = Request.Builder().url("$base/files/$sessionId/$relPath/offset")
+            .header("Authorization", "Bearer $token")
+            .get()
+            .build()
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) return 0L
             val j = JSONObject(resp.body?.string().orEmpty())
@@ -131,6 +150,7 @@ class TransferClient(
 
     private fun putFile(
         base: String,
+        token: String,
         sessionId: String,
         entry: TransferFileEntry,
         offset: Long,
@@ -159,6 +179,7 @@ class TransferClient(
         }
         val req = Request.Builder()
             .url("$base/files/$sessionId/${entry.relPath}")
+            .header("Authorization", "Bearer $token")
             .header("Range", "bytes=$offset-")
             .put(body)
             .build()
@@ -167,9 +188,12 @@ class TransferClient(
         }
     }
 
-    private fun postComplete(base: String, sessionId: String): JSONObject {
+    private fun postComplete(base: String, token: String, sessionId: String): JSONObject {
         val body = ByteArray(0).toRequestBody(null)
-        val req = Request.Builder().url("$base/complete/$sessionId").post(body).build()
+        val req = Request.Builder().url("$base/complete/$sessionId")
+            .header("Authorization", "Bearer $token")
+            .post(body)
+            .build()
         client.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) throw IllegalStateException("导入失败 HTTP ${resp.code}: ${text.take(200)}")

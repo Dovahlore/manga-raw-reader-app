@@ -29,7 +29,7 @@ RELEASES_DIR = DATA_DIR / "releases"    # App 安装包（挂载卷，放包即�
 API_TOKEN = os.getenv("MIT_API_TOKEN", "").strip()
 
 # 跨页上下文默认取前几页（0=关闭）；App 显式传 context 时以 App 为准
-CONTEXT_PAGES = int(os.getenv("MIT_CONTEXT_PAGES", "1"))
+CONTEXT_PAGES = int(os.getenv("MIT_CONTEXT_PAGES", "3"))
 
 # 单页翻译超时（秒）
 ENGINE_TIMEOUT = float(os.getenv("MIT_ENGINE_TIMEOUT", "900"))

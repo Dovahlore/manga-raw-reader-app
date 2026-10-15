@@ -35,7 +35,7 @@ Manga Image Translator 是一套可以完全自托管的漫画翻译和阅读系
 ## 核心亮点
 
 - 📖 **真漫画阅读器**：RTL 日漫模式、LTR 普通模式、缩放平移、边缘翻页、译文/原图一键切换、音量键翻页。
-- 🧠 **完整翻译管线**：文字检测、OCR、气泡分割、背景修复、译文排版和多语言翻译模型都在服务端完成。
+- 🧠 **完整翻译管线**：文字检测、OCR、气泡分割、背景修复、译文排版和多语言翻译模型都在服务端完成；App 可随时切换 OpenAI 兼容模型、Base URL 和 API Key。
 - ☁️ **自托管云书库**：一个 API Key 就是一个账号，不同 Key 的书架完全隔离。
 - 🔄 **多设备接续阅读**：按内容 hash 识别同一本书，阅读进度最后写入者胜，换机后可继续读。
 - 📶 **局域网设备对传**：NSD 自动发现设备，分片断点续传、SHA-256 校验、原子导入。
@@ -57,6 +57,7 @@ Manga Image Translator 是一套可以完全自托管的漫画翻译和阅读系
 | 音量键 | 阅读器内直接上/下一页；遥控器页内远控另一台设备 |
 | 单页翻译 | 当前页手动翻译，已完成页可强制重翻 |
 | 全书翻译 | App 级后台队列，可停止、可恢复、可查看失败页 |
+| 翻译上下文 | 默认携带前 3 页译文，并按真实页码分块，避免多页文字混淆 |
 | 自动预翻 | 自动预翻译当前页之后 3 页，减少等待 |
 | 云同步 | 原书包、页面索引、译文状态、收藏夹、阅读进度 |
 | 离线体验 | 本地书正常阅读；云端书和翻译进度保留最后一次在线快照 |
@@ -130,9 +131,7 @@ cd manga-image-translator
 cp app.env.example app.env
 # 编辑 app.env：设置数据库密码、Redis 密码和 MIT_API_TOKEN
 
-cat > secret.env <<'EOF'
-DEEPSEEK_API_KEY=your-key
-EOF
+touch secret.env   # 可留空；翻译模型 Key 只保存在 Android App
 
 docker compose --env-file app.env -f docker-compose.full.yml up -d
 ```
@@ -159,7 +158,8 @@ Windows 环境也可以按 [android/README.md](android/README.md) 使用 JDK 17�
 2. 打开 App 的「设置」；
 3. 服务器地址填写 `http://<服务器局域网IP>:8020`；
 4. API Key 填写 `app.env` 里的 `MIT_API_TOKEN`；
-5. 点击「测试连接」。
+5. 在「翻译」Tab 填写模型名、API Base URL 和模型 API Key（例如 `deepseek-v4-pro` + `https://api.deepseek.com`），Key 只保存在手机本机；
+6. 返回「服务器」Tab 点击「测试连接」。
 
 > 不要把真实 API Key 写进 README、截图或 Issue。
 

@@ -9,6 +9,9 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.widget.Toast
 import androidx.core.content.FileProvider
@@ -29,6 +32,14 @@ import com.mit.reader.data.Folder
 import com.mit.reader.data.LibraryRepository
 import com.mit.reader.data.ReadingProgress
 import com.mit.reader.data.ReadingMode
+import com.mit.reader.data.RemoteControlClient
+import com.mit.reader.data.RemoteControlManager
+import com.mit.reader.data.RemoteControllerConnection
+import com.mit.reader.data.RemotePageAction
+import com.mit.reader.data.RemoteReaderSnapshot
+import com.mit.reader.data.PairedDevice
+import com.mit.reader.data.RemotePairResult
+import com.mit.reader.data.ServerBook
 import com.mit.reader.data.ServerConfig
 import com.mit.reader.data.TranslationApi
 import com.mit.reader.data.serverId
@@ -52,6 +63,7 @@ import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /** WebView 后台下载任务状态。 */
 enum class DownloadStatus { DOWNLOADING, PAUSED, IMPORTING, DONE, DUPLICATE, FAILED, CANCELED }
@@ -197,7 +209,17 @@ class ReaderApp : Application() {
         private set
     var libraryLastRead by mutableStateOf<Pair<Book, ReadingProgress>?>(null)
         private set
+    var cachedCloudBooks by mutableStateOf<List<CloudBook>>(emptyList())
+        private set
+    var cachedServerBooks by mutableStateOf<List<ServerBook>>(emptyList())
+        private set
+    var cloudSnapshotSavedAt by mutableStateOf(0L)
+        private set
     private var libraryCacheJob: Job? = null
+    private val cloudSnapshotFile by lazy { File(filesDir, "cloud_library_snapshot.json") }
+    private val cloudSnapshotMutex = Mutex()
+    private val cloudSnapshotVersion = AtomicLong(0L)
+    @Volatile private var savedCloudSnapshotVersion = 0L
 
     /** 通知书库内容变了（后台新增/删除书后调用）。 */
     fun bumpLibrary() {
@@ -227,6 +249,90 @@ class ReaderApp : Application() {
             libraryLastRead = library.lastRead(books)
         }
     }
+
+    fun updateCachedCloudBooks(books: List<CloudBook>) {
+        cachedCloudBooks = books
+        persistCloudSnapshot()
+    }
+
+    fun updateCachedServerBooks(books: List<ServerBook>) {
+        cachedServerBooks = books
+        persistCloudSnapshot()
+    }
+
+    private fun persistCloudSnapshot() {
+        val snapshot = JSONObject()
+            .put("saved_at", System.currentTimeMillis())
+            .put("cloud_books", JSONArray(cachedCloudBooks.map(::cloudBookToJson)))
+            .put("server_books", JSONArray(cachedServerBooks.map(::serverBookToJson)))
+            .toString()
+        val version = cloudSnapshotVersion.incrementAndGet()
+        cloudSnapshotSavedAt = System.currentTimeMillis()
+        appScope.launch {
+            cloudSnapshotMutex.withLock {
+                if (version < savedCloudSnapshotVersion) return@withLock
+                savedCloudSnapshotVersion = version
+                withContext(Dispatchers.IO) {
+                    runCatching { cloudSnapshotFile.writeText(snapshot) }
+                }
+            }
+        }
+    }
+
+    private fun loadCloudSnapshot() {
+        runCatching {
+            val root = JSONObject(cloudSnapshotFile.readText())
+            val cloudArray = root.optJSONArray("cloud_books") ?: JSONArray()
+            val serverArray = root.optJSONArray("server_books") ?: JSONArray()
+            cachedCloudBooks = (0 until cloudArray.length()).map { cloudBookFromJson(cloudArray.getJSONObject(it)) }
+            cachedServerBooks = (0 until serverArray.length()).map { serverBookFromJson(serverArray.getJSONObject(it)) }
+            cloudSnapshotSavedAt = root.optLong("saved_at", 0L)
+        }
+    }
+
+    private fun cloudBookToJson(book: CloudBook) = JSONObject()
+        .put("id", book.id)
+        .put("title", book.title ?: JSONObject.NULL)
+        .put("mode", book.mode)
+        .put("page_count", book.pageCount ?: JSONObject.NULL)
+        .put("hash", book.hash ?: JSONObject.NULL)
+        .put("fingerprint", book.fingerprint ?: JSONObject.NULL)
+        .put("size", book.size ?: JSONObject.NULL)
+        .put("folder", book.folder ?: JSONObject.NULL)
+        .put("title_changed_at", book.titleChangedAt)
+        .put("mode_changed_at", book.modeChangedAt)
+
+    private fun cloudBookFromJson(o: JSONObject) = CloudBook(
+        id = o.getString("id"),
+        title = o.optString("title").takeIf { it.isNotBlank() },
+        mode = o.optString("mode", "manga"),
+        pageCount = o.optInt("page_count").takeIf { it >= 0 },
+        hash = o.optString("hash").takeIf { it.isNotBlank() },
+        fingerprint = o.optString("fingerprint").takeIf { it.isNotBlank() },
+        size = o.optLong("size").takeIf { it >= 0 },
+        folder = o.optString("folder").takeIf { it.isNotBlank() },
+        titleChangedAt = o.optLong("title_changed_at", 0L),
+        modeChangedAt = o.optLong("mode_changed_at", 0L),
+    )
+
+    private fun serverBookToJson(book: ServerBook) = JSONObject()
+        .put("id", book.id)
+        .put("title", book.title ?: JSONObject.NULL)
+        .put("page_count", book.pageCount ?: JSONObject.NULL)
+        .put("done_pages", book.donePages)
+        .put("failed_pages", book.failedPages)
+        .put("active_jobs", book.activeJobs)
+        .put("job_status", book.jobStatus ?: JSONObject.NULL)
+
+    private fun serverBookFromJson(o: JSONObject) = ServerBook(
+        id = o.getString("id"),
+        title = o.optString("title").takeIf { it.isNotBlank() },
+        pageCount = o.optInt("page_count").takeIf { it >= 0 },
+        donePages = o.optInt("done_pages", 0),
+        failedPages = o.optInt("failed_pages", 0),
+        activeJobs = o.optInt("active_jobs", 0),
+        jobStatus = o.optString("job_status").takeIf { it.isNotBlank() },
+    )
 
     fun refreshAccountUsage() = appScope.launch {
         val text = StringBuilder()
@@ -469,6 +575,7 @@ class ReaderApp : Application() {
     }
 
     fun translateAllCloudBook(cloudBook: CloudBook) {
+        if (!requireTranslationConfig()) return
         if (cloudBook.id in cloudSubmittingIds) return
         cloudSubmittingIds.add(cloudBook.id)
         runBackgroundAction("translate-cloud:${cloudBook.id}", useStorageGate = false) {
@@ -553,8 +660,39 @@ class ReaderApp : Application() {
 
     fun renameLibraryBook(bookId: String, title: String) = runBackgroundAction("rename-book:$bookId") {
         library.renameBook(bookId, title)
+        library.book(bookId)?.takeIf { it.cloudId != null }?.let { book ->
+            runCatching {
+                api.upsertBook(
+                    book.serverId, book.title, book.pageCount,
+                    if (book.mode == ReadingMode.MANGA) "rtl" else "ltr", book.hash,
+                    mode = if (book.mode == ReadingMode.MANGA) "manga" else "normal",
+                    fingerprint = book.fingerprint,
+                    titleChangedAt = book.titleChangedAt,
+                    modeChangedAt = book.modeChangedAt,
+                )
+            }
+        }
         bumpLibrary()
+        bumpCloud()
     }
+
+    fun setLibraryBookMode(bookId: String, mode: ReadingMode) =
+        runBackgroundAction("set-mode:$bookId") {
+            library.setMode(bookId, mode)
+            library.book(bookId)?.takeIf { it.cloudId != null }?.let { book ->
+                runCatching {
+                    api.upsertBook(
+                        book.serverId, book.title, book.pageCount,
+                        if (book.mode == ReadingMode.MANGA) "rtl" else "ltr", book.hash,
+                        mode = if (book.mode == ReadingMode.MANGA) "manga" else "normal",
+                        fingerprint = book.fingerprint,
+                        titleChangedAt = book.titleChangedAt,
+                        modeChangedAt = book.modeChangedAt,
+                    )
+                }
+            }
+            bumpLibrary()
+        }
 
     /** 删本地书：★ 本地删除不依赖后台服务——先删本地文件与索引，服务端记录能删就删、
      *  删不掉（离线）记进补删队列下次在线补。已同步的书不动云端副本（serverId=cloudId，删了云端就没了）。 */
@@ -676,6 +814,9 @@ class ReaderApp : Application() {
     private val _pageTranslationFailed = MutableSharedFlow<Triple<String, Int, String?>>()
     val pageTranslationFailed: SharedFlow<Triple<String, Int, String?>> = _pageTranslationFailed.asSharedFlow()
 
+    suspend fun activePageJobs(book: Book): List<Int> =
+        api.activePageJobs(book.serverId).map { it.pageIndex }
+
     /** 阅读器页级刷新跑在应用级作用域；退出阅读器只取消 UI 收集，不取消下载。 */
     fun refreshBookFromServer(book: Book) = runBackgroundAction("refresh-book:${book.id}") {
         val done = library.refreshTranslations(book, overwrite = false, priority = null)
@@ -684,6 +825,10 @@ class ReaderApp : Application() {
 
     /** 单页翻译跑在应用级作用域；退出阅读器后结果仍写入本地缓存。 */
     fun translateBookPage(book: Book, index: Int, force: Boolean) = runBackgroundAction("translate-page:${book.id}:$index") {
+        if (!requireTranslationConfig()) {
+            _pageTranslationFailed.tryEmit(Triple(book.id, index, "未配置模型 API Key"))
+            return@runBackgroundAction
+        }
         if (!requireOnline()) {
             _pageTranslationFailed.tryEmit(Triple(book.id, index, "未连接"))
             return@runBackgroundAction
@@ -720,12 +865,18 @@ class ReaderApp : Application() {
             if (!finished) error = "超时：翻译未在 16 分钟内完成"
             if (error != null) throw IllegalStateException(error)
 
-            val output = library.translatedCacheFile(book.id, index)
-            output.parentFile?.mkdirs()
-            api.download(api.translatedUrl(pageId), output)
+            library.downloadTranslatedPage(book.id, pageId, index)
             _pageTranslated.tryEmit(book.id to index)
         } catch (e: Exception) {
-            _pageTranslationFailed.tryEmit(Triple(book.id, index, e.message))
+            val message = translationErrorMessage(e)
+            if (force) {
+                runCatching {
+                    val serverPage = api.bookPages(book.serverId).firstOrNull { it.pageIndex == index }
+                    if (serverPage != null) library.downloadTranslatedPage(book.id, serverPage.id, index)
+                }
+            }
+            _pageTranslationFailed.tryEmit(Triple(book.id, index, message))
+            Toast.makeText(this, "翻译失败：$message", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -1118,6 +1269,27 @@ class ReaderApp : Application() {
 
     private var transferServer: TransferServer? = null
     private var transferClient: TransferClient? = null
+    private val remoteClient by lazy { RemoteControlClient() }
+    private val remoteCommandMutex = Mutex()
+    private var remoteHeartbeatJob: Job? = null
+    @Volatile private var lastRemoteCommandAt = 0L
+    private val remoteControllerId by lazy {
+        prefs.getString("remote_controller_id", null) ?: UUID.randomUUID().toString().also {
+            prefs.edit().putString("remote_controller_id", it).apply()
+        }
+    }
+    val localDeviceId: String get() = remoteControllerId
+
+    var pairedDevices by mutableStateOf<List<PairedDevice>>(emptyList())
+        private set
+    private val pairedDeviceLock = Any()
+    private var pairedDeviceRecords = emptyList<PairedDevice>()
+    var pendingRemoteDeviceId by mutableStateOf<String?>(null)
+        private set
+
+    /** 可被发现（NSD 广播）：关闭后其他设备搜索不到本机，仍可通过 IP:端口 手动连接。 */
+    var nsdDiscoverable by mutableStateOf(false)
+        private set
 
     /** 附近可接收设备（NSD 发现的列表）。 */
     var transferDevices by mutableStateOf<List<DiscoveredDevice>>(emptyList())
@@ -1130,6 +1302,26 @@ class ReaderApp : Application() {
     var incomingTransfer by mutableStateOf<IncomingTransfer?>(null)
         private set
 
+    /** 被控端状态与遥控端连接都挂在 Application 上，页面退出不中断、不产生页面 scope 泄漏。 */
+    val remoteControl by lazy {
+        RemoteControlManager(appScope, Handler(Looper.getMainLooper())) { token ->
+            pairedDeviceByToken(token)
+        }
+    }
+    var remoteControllerConnection by mutableStateOf<RemoteControllerConnection?>(null)
+        private set
+    var remoteControllerReader by mutableStateOf<RemoteReaderSnapshot?>(null)
+        private set
+    var remoteControllerMessage by mutableStateOf("")
+        private set
+    var remoteControllerBusy by mutableStateOf(false)
+        private set
+    var remoteControllerScreenActive by mutableStateOf(false)
+    var remoteVolumeKeysEnabled by mutableStateOf(true)
+    var readerScreenActive by mutableStateOf(false)
+        private set
+    private var applicationInForeground = false
+
     fun startDeviceDiscovery() {
         transferDevices = emptyList()
         transferDiscovering = true
@@ -1141,6 +1333,340 @@ class ReaderApp : Application() {
         transferClient?.stopDiscovery()
     }
 
+    fun localTransferEndpoint(): String? = transferServer?.localEndpoint()
+
+    private fun loadPairedDevices() {
+        val records = runCatching {
+            val array = JSONArray(prefs.getString("paired_devices", "[]"))
+            (0 until array.length()).map { i ->
+                val o = array.getJSONObject(i)
+                PairedDevice(
+                    deviceId = o.getString("deviceId"),
+                    name = o.getString("name"),
+                    host = o.getString("host"),
+                    port = o.getInt("port"),
+                    token = o.getString("token"),
+                    lastConnectedAt = o.optLong("lastConnectedAt", 0L),
+                )
+            }
+        }.getOrDefault(emptyList())
+        synchronized(pairedDeviceLock) {
+            pairedDeviceRecords = records
+            pairedDevices = records
+        }
+    }
+
+    fun upsertPairedDevice(device: PairedDevice) {
+        val records = synchronized(pairedDeviceLock) {
+            pairedDeviceRecords = (pairedDeviceRecords.filterNot { it.deviceId == device.deviceId } + device)
+                .sortedByDescending { it.lastConnectedAt }
+            pairedDevices = pairedDeviceRecords
+            pairedDeviceRecords
+        }
+        prefs.edit().putString("paired_devices", JSONArray(records.map(::pairedDeviceToJson)).toString()).apply()
+    }
+
+    fun forgetPairedDevice(deviceId: String) {
+        val records = synchronized(pairedDeviceLock) {
+            pairedDeviceRecords = pairedDeviceRecords.filterNot { it.deviceId == deviceId }
+            pairedDevices = pairedDeviceRecords
+            pairedDeviceRecords
+        }
+        prefs.edit().putString("paired_devices", JSONArray(records.map(::pairedDeviceToJson)).toString()).apply()
+    }
+
+    private fun pairedDeviceToJson(device: PairedDevice) = JSONObject()
+        .put("deviceId", device.deviceId)
+        .put("name", device.name)
+        .put("host", device.host)
+        .put("port", device.port)
+        .put("token", device.token)
+        .put("lastConnectedAt", device.lastConnectedAt)
+
+    private fun pairedDeviceByToken(token: String): PairedDevice? = synchronized(pairedDeviceLock) {
+        pairedDeviceRecords.firstOrNull { it.token == token }
+    }
+
+    fun transferTokenFor(device: DiscoveredDevice): String? = synchronized(pairedDeviceLock) {
+        pairedDeviceRecords.firstOrNull { it.host == device.host || it.name == device.name }?.token
+    }
+
+    fun pairedDeviceFor(device: DiscoveredDevice): PairedDevice? = synchronized(pairedDeviceLock) {
+        pairedDeviceRecords.firstOrNull { it.host == device.host || it.name == device.name }
+    }
+
+    fun prepareRemoteConnect(deviceId: String) {
+        pendingRemoteDeviceId = deviceId
+    }
+
+    fun consumePendingRemoteConnect(): PairedDevice? {
+        val id = pendingRemoteDeviceId ?: return null
+        pendingRemoteDeviceId = null
+        return synchronized(pairedDeviceLock) { pairedDeviceRecords.firstOrNull { it.deviceId == id } }
+    }
+
+    fun showRemoteControllerMessage(message: String) {
+        remoteControllerMessage = message
+    }
+
+    fun parseManualDevice(input: String): DiscoveredDevice? {
+        val raw = input.trim()
+            .removePrefix("http://")
+            .removePrefix("https://")
+            .trimEnd('/')
+        val bracketIpv6 = Regex("""^\[([0-9A-Fa-f:]+)]:(\d{1,5})$""").find(raw)
+        val host: String
+        val portText: String
+        if (bracketIpv6 != null) {
+            host = bracketIpv6.groupValues[1]
+            portText = bracketIpv6.groupValues[2]
+        } else {
+            val separator = raw.lastIndexOf(':')
+            if (separator <= 0 || separator == raw.length - 1) return null
+            host = raw.substring(0, separator)
+            portText = raw.substring(separator + 1)
+        }
+        val port = portText.toIntOrNull()?.coerceIn(1, 65535) ?: return null
+        if (host.isBlank() || host.contains('/')) return null
+        return DiscoveredDevice("手动连接（$host:$port）", host, port)
+    }
+
+    /** 打开/关闭对附近设备的广播（NSD）。 */
+    fun setDeviceDiscoverable(enabled: Boolean) {
+        nsdDiscoverable = enabled
+        prefs.edit().putBoolean("nsd_discoverable", enabled).apply()
+        transferServer?.setDiscoverable(enabled)
+    }
+
+    /** 被控模式打开后 5 分钟内没有遥控器配对就自动关闭（对齐蓝牙可见性超时的体验）。 */
+    private var hostAutoCloseJob: Job? = null
+
+    private fun startHostAutoCloseTimer() {
+        hostAutoCloseJob?.cancel()
+        hostAutoCloseJob = appScope.launch {
+            delay(5 * 60_000L)
+            if (remoteControl.hostEnabled && remoteControl.connectedControllerName == null) {
+                setRemoteHostEnabled(false)
+                Toast.makeText(this@ReaderApp, "5 分钟内没有遥控器连接，已自动退出被控模式", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun cancelHostAutoCloseTimer() {
+        hostAutoCloseJob?.cancel()
+        hostAutoCloseJob = null
+    }
+
+    fun setRemoteHostEnabled(enabled: Boolean, refreshCode: Boolean = false): Boolean {
+        if (enabled && (remoteControllerScreenActive || remoteControllerConnection != null)) {
+            remoteControllerMessage = "当前是遥控器模式，不能同时作为被控端"
+            return false
+        }
+        remoteControl.setHostEnabled(enabled, refreshCode)
+        prefs.edit().putBoolean("remote_host_enabled", enabled).apply()
+        if (enabled) startHostAutoCloseTimer() else cancelHostAutoCloseTimer()
+        return true
+    }
+
+    fun refreshRemotePairingCode() {
+        if (remoteControllerScreenActive || remoteControllerConnection != null) {
+            remoteControllerMessage = "当前是遥控器模式，不能同时作为被控端"
+            return
+        }
+        remoteControl.refreshPairingCode()
+    }
+
+    fun disconnectRemoteHostController() {
+        remoteControl.disconnectController()
+    }
+
+    fun enterRemoteControllerMode() {
+        remoteControl.disconnectController()
+        remoteControl.setHostEnabled(false)
+        prefs.edit().putBoolean("remote_host_enabled", false).apply()
+        remoteControllerScreenActive = true
+    }
+
+    fun leaveRemoteControllerScreen() {
+        remoteControllerScreenActive = false
+    }
+
+    fun updateReaderScreenActive(active: Boolean) {
+        readerScreenActive = active
+        updateRemoteReaderAvailability()
+    }
+
+    fun pageWithVolume(action: RemotePageAction) {
+        remoteControl.dispatchLocalCommand(action)
+    }
+
+    fun updateRemoteVolumeKeysEnabled(enabled: Boolean) {
+        remoteVolumeKeysEnabled = enabled
+        prefs.edit().putBoolean("remote_volume_keys", enabled).apply()
+    }
+
+    fun pairRemoteController(device: DiscoveredDevice, code: String) {
+        if (remoteControllerBusy) return
+        remoteControl.setHostEnabled(false)
+        remoteControllerBusy = true
+        remoteControllerMessage = "正在配对…"
+        appScope.launch {
+            try {
+                val paired = withContext(Dispatchers.IO) {
+                    val result = remoteClient.pair(
+                        device,
+                        code,
+                        Build.MODEL,
+                        remoteControllerId,
+                        localTransferEndpoint(),
+                    )
+                    PairedDevice(
+                        deviceId = result.hostDeviceId,
+                        name = result.hostName,
+                        host = device.host,
+                        port = device.port,
+                        token = result.token,
+                        lastConnectedAt = System.currentTimeMillis(),
+                    ).also(::upsertPairedDevice)
+                }
+                remoteControllerConnection = RemoteControllerConnection(device, paired.token)
+                remoteControllerMessage = "已连接 ${device.name}"
+                startRemoteControllerHeartbeat()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                remoteControllerConnection = null
+                remoteControllerMessage = e.message ?: "配对失败"
+            } finally {
+                remoteControllerBusy = false
+            }
+        }
+    }
+
+    fun connectPairedRemoteDevice(device: PairedDevice) {
+        if (remoteControllerBusy) return
+        val target = DiscoveredDevice(device.name, device.host, device.port)
+        remoteControl.setHostEnabled(false)
+        remoteControllerBusy = true
+        remoteControllerMessage = "正在连接 ${device.name}…"
+        appScope.launch {
+            try {
+                val status = withContext(Dispatchers.IO) {
+                    remoteClient.heartbeat(target, device.token)
+                }
+                if (!status.ok) throw IllegalStateException(status.reason ?: "设备未授权")
+                remoteControllerConnection = RemoteControllerConnection(target, device.token)
+                remoteControllerReader = status.reader
+                remoteControllerMessage = if (status.readerActive) "已连接" else "等待阅读端打开书籍"
+                upsertPairedDevice(device.copy(lastConnectedAt = System.currentTimeMillis()))
+                startRemoteControllerHeartbeat()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                remoteControllerConnection = null
+                remoteControllerReader = null
+                remoteControllerMessage = e.message ?: "连接失败"
+            } finally {
+                remoteControllerBusy = false
+            }
+        }
+    }
+
+    fun heartbeatRemoteController() {
+        val connection = remoteControllerConnection ?: return
+        appScope.launch {
+            try {
+                val status = withContext(Dispatchers.IO) {
+                    remoteClient.heartbeat(connection.device, connection.token)
+                }
+                if (!status.ok) {
+                    remoteControllerConnection = null
+                    remoteControllerReader = null
+                    remoteControllerMessage = status.reason ?: "遥控连接已断开"
+                } else {
+                    remoteControllerReader = status.reader
+                    remoteControllerMessage = if (status.readerActive) "已连接" else "等待阅读端打开书籍"
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                remoteControllerConnection = null
+                remoteControllerReader = null
+                remoteControllerMessage = "连接失败：${e.message ?: "网络错误"}"
+            }
+        }
+    }
+
+    private fun startRemoteControllerHeartbeat() {
+        remoteHeartbeatJob?.cancel()
+        remoteHeartbeatJob = appScope.launch {
+            while (remoteControllerConnection != null) {
+                val connection = remoteControllerConnection ?: break
+                try {
+                    val status = withContext(Dispatchers.IO) {
+                        remoteClient.heartbeat(connection.device, connection.token)
+                    }
+                    if (!status.ok) {
+                        remoteControllerConnection = null
+                        remoteControllerReader = null
+                        remoteControllerMessage = status.reason ?: "遥控连接已断开"
+                        break
+                    }
+                    remoteControllerReader = status.reader
+                    remoteControllerMessage = if (status.readerActive) "已连接" else "等待阅读端打开书籍"
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    remoteControllerConnection = null
+                    remoteControllerReader = null
+                    remoteControllerMessage = "连接失败：${e.message ?: "网络错误"}"
+                    break
+                }
+                delay(2_000)
+            }
+        }
+    }
+
+    fun disconnectRemoteController() {
+        remoteHeartbeatJob?.cancel()
+        remoteHeartbeatJob = null
+        remoteControllerConnection = null
+        remoteControllerReader = null
+        remoteControllerMessage = "已断开"
+    }
+
+    fun sendRemoteCommand(action: RemotePageAction) {
+        val connection = remoteControllerConnection ?: return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastRemoteCommandAt < 160) return
+        lastRemoteCommandAt = now
+        appScope.launch {
+            remoteCommandMutex.withLock {
+                try {
+                    val ack = withContext(Dispatchers.IO) {
+                        remoteClient.sendCommand(connection.device, connection.token, action)
+                    }
+                    remoteControllerReader = ack.reader ?: remoteControllerReader
+                    remoteControllerMessage = when {
+                        !ack.ok -> ack.reason ?: "遥控命令失败"
+                        !ack.accepted -> ack.reason ?: "当前不在阅读器"
+                        else -> "已翻页"
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    remoteControllerConnection = null
+                    remoteControllerReader = null
+                    remoteControllerMessage = "连接失败：${e.message ?: "网络错误"}"
+                }
+            }
+        }
+    }
+
+    private fun updateRemoteReaderAvailability() {
+        remoteControl.updateReaderInteractionAllowed(applicationInForeground && readerScreenActive)
+    }
+
     /** 发送一本书给选中设备（后台进行，书下方进度条展示）。 */
     fun shareBook(book: Book, device: DiscoveredDevice) {
         if (shareTasks.containsKey(book.id)) return
@@ -1150,7 +1676,9 @@ class ReaderApp : Application() {
                 withContext(Dispatchers.IO) {
                     val pkg = storageGate.withLock { library.transferPackage(book) }
                     val client = transferClient ?: throw IllegalStateException("传输未初始化")
-                    client.send(device, pkg.manifestJson, pkg.files,
+                    val paired = pairedDeviceFor(device)
+                        ?: throw IllegalStateException("设备未配对，请先在遥控器模式完成配对")
+                    client.send(device, paired.token, pkg.manifestJson, pkg.files,
                         onStage = { text ->
                             appScope.launch { shareTasks[book.id] = SyncTask(text, null) }
                         },
@@ -1163,6 +1691,9 @@ class ReaderApp : Application() {
                             }
                         },
                     )
+                }
+                pairedDeviceFor(device)?.let {
+                    upsertPairedDevice(it.copy(lastConnectedAt = System.currentTimeMillis()))
                 }
                 Toast.makeText(this@ReaderApp, "已发送《${book.title}》", Toast.LENGTH_SHORT).show()
             } catch (e: PeerHasBookException) {
@@ -1203,7 +1734,9 @@ class ReaderApp : Application() {
                 api.upsertBook(book.serverId, book.title, book.pageCount,
                     if (book.mode == ReadingMode.MANGA) "rtl" else "ltr", book.hash,
                     mode = if (book.mode == ReadingMode.MANGA) "manga" else "normal",
-                    fingerprint = book.fingerprint)
+                    fingerprint = book.fingerprint,
+                    titleChangedAt = book.titleChangedAt,
+                    modeChangedAt = book.modeChangedAt)
             }
         }
     }
@@ -1215,13 +1748,49 @@ class ReaderApp : Application() {
         return false
     }
 
+    private fun requireTranslationConfig(): Boolean {
+        if (ServerConfig.isTranslationConfigured()) return true
+        Toast.makeText(this, "请先在设置中保存模型名、Base URL 和模型 API Key", Toast.LENGTH_LONG).show()
+        return false
+    }
+
+    private fun translationErrorMessage(e: Exception): String {
+        val message = e.message.orEmpty()
+        return when {
+            message.contains("insufficient", ignoreCase = true) ||
+                message.contains("balance", ignoreCase = true) ||
+                message.contains("quota", ignoreCase = true) ||
+                message.contains("billing", ignoreCase = true) -> "模型 API 余额不足或已超过限额"
+            message.contains("401", ignoreCase = true) ||
+                message.contains("authentication", ignoreCase = true) ||
+                message.contains("api key", ignoreCase = true) -> "模型 API Key 无效或未授权"
+            message.contains("model names", ignoreCase = true) ||
+                message.contains("invalid_request_error", ignoreCase = true) -> "模型名或模型配置错误"
+            message.contains("connection error", ignoreCase = true) ||
+                message.contains("name or service not known", ignoreCase = true) -> "模型 Base URL 无法连接"
+            message.contains("429", ignoreCase = true) -> "模型 API 限流，请稍后手动重试"
+            else -> message.ifBlank { "未知错误" }.take(500)
+        }
+    }
+
+    private fun isFatalTranslationError(e: Exception): Boolean {
+        val message = translationErrorMessage(e)
+        return message.startsWith("模型 API") || message.startsWith("模型名") || message.startsWith("模型 Base")
+    }
+
     override fun onCreate() {
         super.onCreate()
         ServerConfig.init(this)
+        loadCloudSnapshot()
         library = LibraryRepository(this)
         currentLibraryStorageDir = libraryStorageOptions()
             .firstOrNull { it.path == ServerConfig.libraryStorageDir }?.path
             ?: libraryStorageOptions().first().path
+        remoteVolumeKeysEnabled = prefs.getBoolean("remote_volume_keys", true)
+        loadPairedDevices()
+        if (prefs.getBoolean("remote_host_enabled", false) && pairedDevices.isNotEmpty()) {
+            remoteControl.setHostEnabled(true, refreshCode = true)
+        }
         loadDownloads()
         resumeTranslatingBook()
         resumeInterruptedStorageMigration()
@@ -1234,6 +1803,7 @@ class ReaderApp : Application() {
         // 设备对传：接收方起本地 HTTP 服务 + NSD 广播；发送方按需发现
         transferClient = TransferClient(
             this,
+            localDeviceId,
             onDeviceFound = { d ->
                 transferDevices = transferDevices.filterNot { it.name == d.name } + d
             },
@@ -1241,6 +1811,7 @@ class ReaderApp : Application() {
         )
         transferServer = TransferServer(
             this,
+            localDeviceId,
             existingBookByHash = { hash -> library.findByHash(hash) },
             hasTranslatedPage = { id, idx -> library.hasTranslatedLocal(id, idx) },
             importBook = { staging, manifest ->
@@ -1262,8 +1833,33 @@ class ReaderApp : Application() {
             onProgress = { _, received, total ->
                 incomingTransfer = incomingTransfer?.copy(received = received, total = total, message = "接收中…")
             },
+            remotePair = { code, controllerName, controllerId, controllerEndpoint ->
+                remoteControl.pair(code, controllerName, controllerId)?.let { token ->
+                    cancelHostAutoCloseTimer()
+                    parseManualDevice(controllerEndpoint)?.let { endpoint ->
+                        upsertPairedDevice(
+                            PairedDevice(
+                                deviceId = controllerId,
+                                name = controllerName.ifBlank { "未命名设备" },
+                                host = endpoint.host,
+                                port = endpoint.port,
+                                token = token,
+                                lastConnectedAt = System.currentTimeMillis(),
+                            )
+                        )
+                    }
+                    RemotePairResult(token, localDeviceId, Build.MODEL)
+                }
+            },
+            remoteHeartbeat = { token -> remoteControl.heartbeat(token) },
+            remoteCommand = { token, action, requestId ->
+                remoteControl.executeCommand(token, action, requestId)
+            },
+            isTransferAuthorized = { token -> pairedDeviceByToken(token) != null },
         )
         transferServer?.startReceiver()
+        nsdDiscoverable = prefs.getBoolean("nsd_discoverable", false)
+        transferServer?.setDiscoverable(nsdDiscoverable)
         // 冷启动自动查更新（30 分钟内查过就跳过，避免每次启动都请求）
         if (System.currentTimeMillis() - prefs.getLong("last_update_check", 0) > 30 * 60 * 1000) {
             prefs.edit().putLong("last_update_check", System.currentTimeMillis()).apply()
@@ -1359,7 +1955,7 @@ class ReaderApp : Application() {
         val folderNameById = folders.associate { it.id to it.name }
 
         val bookArr = JSONArray()
-        books.filter { it.cloudId == null && it.hash.isNotEmpty() }.forEach { b ->
+        books.filter { it.hash.isNotEmpty() }.forEach { b ->
             bookArr.put(JSONObject().apply {
                 put("id", b.serverId)
                 put("title", b.title)
@@ -1368,6 +1964,8 @@ class ReaderApp : Application() {
                 put("hash", b.hash)
                 put("mode", if (b.mode == ReadingMode.MANGA) "manga" else "normal")
                 if (b.fingerprint.isNotEmpty()) put("fingerprint", b.fingerprint)
+                if (b.titleChangedAt > 0L) put("title_changed_at", b.titleChangedAt)
+                if (b.modeChangedAt > 0L) put("mode_changed_at", b.modeChangedAt)
             })
         }
         val progressArr = JSONArray()
@@ -1417,6 +2015,7 @@ class ReaderApp : Application() {
 
         // 拉：云端书 → 按 hash 匹配挂/修 cloudId；云端书已被删的（cloudId 不在列表里）脱钩
         val cloudIdByHash = mutableMapOf<String, String>()
+        val cloudBookByHash = mutableMapOf<String, org.json.JSONObject>()
         val cloudIds = mutableSetOf<String>()
         val cbArr = resp.optJSONArray("cloud_books") ?: JSONArray()
         for (i in 0 until cbArr.length()) {
@@ -1424,6 +2023,7 @@ class ReaderApp : Application() {
             val cid = o.getString("id")
             cloudIds.add(cid)
             o.optString("hash").takeIf { it.isNotBlank() }?.let { cloudIdByHash[it] = cid }
+            o.optString("hash").takeIf { it.isNotBlank() }?.let { cloudBookByHash[it] = o }
         }
         for (b in books) {
             val cid = cloudIdByHash[b.hash]   // hash 命中云端书 → 挂/修 cloudId
@@ -1432,6 +2032,17 @@ class ReaderApp : Application() {
                     runCatching { library.attachCloudId(b.id, cid) }
                 b.cloudId != null && b.cloudId !in cloudIds ->
                     runCatching { library.detachCloudByCloudId(b.cloudId!!) }   // 陈旧 UUID cloudId / 云端书已删
+            }
+            cloudBookByHash[b.hash]?.let { remote ->
+                runCatching {
+                    library.applyIncomingBookMetadata(
+                        b.id,
+                        remote.optString("title"),
+                        remote.optString("mode"),
+                        remote.optLong("title_changed_at", 0L),
+                        remote.optLong("mode_changed_at", 0L),
+                    )
+                }
             }
         }
 
@@ -1524,12 +2135,17 @@ class ReaderApp : Application() {
     private fun registerForegroundPing() {
         registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
+                applicationInForeground = true
+                updateRemoteReaderAvailability()
                 val now = System.currentTimeMillis()
                 if (now - lastForegroundPingAt < 5_000) return
                 lastForegroundPingAt = now
                 refreshServerStatus()
             }
-            override fun onActivityPaused(activity: Activity) {}
+            override fun onActivityPaused(activity: Activity) {
+                applicationInForeground = false
+                updateRemoteReaderAvailability()
+            }
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
             override fun onActivityStarted(activity: Activity) {}
             override fun onActivityStopped(activity: Activity) {}
@@ -1660,6 +2276,7 @@ class ReaderApp : Application() {
     /** 一键全书翻译（后台排队执行）。已在队列/正在翻则忽略；多本书按点击顺序一本本翻。 */
     fun startTranslateAll(book: Book) {
         if (!requireOnline()) return
+        if (!requireTranslationConfig()) return
         if (book.id in translateQueue) return
         translateQueue.add(book.id)
         persistQueue()
@@ -1704,6 +2321,7 @@ class ReaderApp : Application() {
         } catch (e: CancellationException) {
             if (!stopRequested) throw e   // 应用退出（非用户停止）→ 重新抛出取消整个队列
         } catch (e: Exception) {
+            if (isFatalTranslationError(e)) translateQueue.clear()
             if (!stopRequested) {
                 Toast.makeText(this@ReaderApp, "《${book.title}》翻译失败：${e.message}", Toast.LENGTH_LONG).show()
             }
@@ -1787,6 +2405,13 @@ class ReaderApp : Application() {
                 // 轮询服务端进度，把翻好的页下载到本地缓存
                 while (true) {
                     if (stopRequested) throw CancellationException("用户停止")
+                    serverJobId?.let { jobId ->
+                        val status = api.job(jobId)
+                        when (status.status) {
+                            "failed" -> throw IllegalStateException(status.error ?: "全书翻译失败")
+                            "cancelled" -> throw CancellationException("用户停止")
+                        }
+                    }
                     val pages = api.bookPages(serverId)
                     var done = 0
                     for (p in pages) {

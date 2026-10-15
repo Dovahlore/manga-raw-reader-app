@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS books (
   size        BIGINT       NULL,
   folder_id   BIGINT       NULL,          -- 云端收藏夹 id（软引用 cloud_folders.id）
   folder_changed_at BIGINT  NULL,         -- 夹归属最后变更的客户端毫秒时间戳（本地书/云端书通用 LWW）
+  title_changed_at BIGINT   NULL,         -- 书名最后变更时间戳（多设备 LWW）
+  mode_changed_at BIGINT    NULL,         -- 阅读模式最后变更时间戳（多设备 LWW）
   synced_at   DATETIME     NULL,
   created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -105,6 +107,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   owner       VARCHAR(191) NOT NULL DEFAULT 'default',  -- 任务归属账号（与 books.owner 同源）
   book_id     VARCHAR(191) NULL,           -- whole-book 任务归属的书（删书/取消同步时按书取消后台任务）
   page_id     BIGINT      NULL,           -- 完成后回填；页删了跟着删
+  target_page_index INT NULL,              -- 单页任务的目标页（whole-book 为 NULL），用于同页去重
   action      VARCHAR(32) NOT NULL,       -- translate / retranslate
   status      VARCHAR(16) NOT NULL,       -- queued / running / done / failed
   attempts    INT NOT NULL DEFAULT 0,
@@ -116,6 +119,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   KEY idx_status (status),
   KEY idx_owner (owner),
   KEY idx_jobs_book (book_id),
+  KEY idx_jobs_target_page (book_id, target_page_index, status),
   CONSTRAINT fk_jobs_page FOREIGN KEY (page_id) REFERENCES pages (id) ON DELETE CASCADE,
   CONSTRAINT fk_jobs_book FOREIGN KEY (book_id) REFERENCES books (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
