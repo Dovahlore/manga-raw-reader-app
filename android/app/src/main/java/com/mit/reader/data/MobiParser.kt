@@ -1,16 +1,27 @@
 package com.mit.reader.data
 
 import java.io.File
+import java.io.RandomAccessFile
 
 /**
  * 极简 MOBI/AZW 解析：只针对"图页型"漫画（每页一张图，HTML 里用 <img recindex="N"> 指向图片记录）。
  * 做法：解析 PDB 头 → 解压 PalmDOC 文本记录拼出 HTML → 按文档顺序取 <img recindex> → 抽对应记录里的图。
  * 纯文字 MOBI 不覆盖（封面也取第一张图）。
+ *
+ * 修复（05-中7 二阶段，流式化）：不再整文件 readBytes——只常驻 PDB 头 + 记录偏移表
+ * （≈78 + 8×记录数 字节），每条记录经 RandomAccessFile 现读现弃；峰值内存 ≈ 最大单记录
+ * （图片记录通常几 MB）而非整个文件。200~300MB 的图页 MOBI 可正常导入，上限放宽到 500MB
+ * 仅作体量闸（防极端文件写满磁盘）；解压产物走 ExtractBudget（2GB/2 万条），OOM 转
+ * 可展示的导入失败而非闪退。
  */
 object MobiParser {
 
-    // 05-中7：MOBI 是全内存解析（readBytes + 解压缓冲 + 字符串拼接），大文件直接 OOM——按文件大小拦截
-    private const val MAX_MOBI_BYTES = 150L * 1024 * 1024
+    // 体量闸（磁盘/时长考量）；内存不再依赖此值（按记录流式读取）
+    private const val MAX_MOBI_BYTES = 500L * 1024 * 1024
+
+    // 文本记录（HTML）解压总量上限：图页漫画的 HTML 通常只有几十 KB；
+    // 超过即基本可断定是纯文字书（本就不支持），提前失败防字符串膨胀
+    private const val MAX_HTML_CHARS = 16 * 1024 * 1024
 
     private val JPEG = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte())
     private val PNG = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47)
@@ -19,21 +30,44 @@ object MobiParser {
     private val SIGS = listOf(JPEG, PNG, GIF87, GIF89)
 
     fun extract(mobi: File, bookDir: File): ParsedBook {
-        if (mobi.length() > MAX_MOBI_BYTES) throw IllegalStateException("MOBI 文件过大，暂不支持")
+        if (mobi.length() > MAX_MOBI_BYTES) throw IllegalStateException("MOBI 文件过大（上限 500MB）")
         val pagesDir = File(bookDir, "pages").apply { mkdirs() }
-        val data = mobi.readBytes()
-        if (data.size < 78) throw IllegalStateException("不是有效的 MOBI 文件")
+        return try {
+            RandomAccessFile(mobi, "r").use { raf ->
+                extractFrom(raf, raf.length(), mobi, pagesDir)
+            }
+        } catch (e: OutOfMemoryError) {
+            // 修复（05-中7 残留）：Error 不进任何 catch(Exception) 边界——单条记录异常巨大时
+            // 转成可展示的导入失败提示，而不是直接闪退
+            throw IllegalStateException("MOBI 解析内存不足（文件可能损坏或不是图页型漫画）")
+        }
+    }
 
-        val numRecords = u16(data, 76)
-        if (numRecords <= 0 || 78 + numRecords * 8 > data.size) throw IllegalStateException("MOBI 记录表损坏")
+    private fun extractFrom(raf: RandomAccessFile, fileSize: Long, mobi: File, pagesDir: File): ParsedBook {
+        if (fileSize < 78) throw IllegalStateException("不是有效的 MOBI 文件")
 
+        // ---- 常驻内存只有：PDB 头 78B + 记录偏移表（8B×N）----
+        val header = ByteArray(78)
+        raf.readFully(header)
+        val numRecords = u16(header, 76)
+        if (numRecords <= 0 || 78 + numRecords.toLong() * 8 > fileSize) {
+            throw IllegalStateException("MOBI 记录表损坏")
+        }
         val offsets = IntArray(numRecords)
-        for (i in 0 until numRecords) offsets[i] = u32(data, 78 + i * 8).toInt()
+        val table = ByteArray(numRecords * 8)
+        raf.readFully(table)
+        for (i in 0 until numRecords) offsets[i] = u32(table, i * 8).toInt()
 
         fun record(i: Int): ByteArray {
-            val start = offsets[i]
-            val end = if (i + 1 < numRecords) offsets[i + 1] else data.size
-            return data.copyOfRange(start, end.coerceAtMost(data.size))
+            if (i < 0 || i >= numRecords) return ByteArray(0)
+            val start = offsets[i].toLong().coerceIn(0, fileSize)
+            val end = (if (i + 1 < numRecords) offsets[i + 1].toLong() else fileSize)
+                .coerceIn(start, fileSize)
+            if (end <= start) return ByteArray(0)
+            val a = ByteArray((end - start).toInt())
+            raf.seek(start)
+            raf.readFully(a)
+            return a
         }
 
         val rec0 = record(0)
@@ -41,11 +75,11 @@ object MobiParser {
         val textRecordCount = u16(rec0, 8)
 
         // 标题：EXTH(503=更新标题 / 100=作者) > PDB 名 > 文件名
-        val pdbName = String(data, 0, 32, Charsets.UTF_8).trimEnd('\u0000', ' ').trim()
+        val pdbName = String(header, 0, 32, Charsets.UTF_8).trimEnd('\u0000', ' ').trim()
         val exth = parseExth(rec0)
         val title = exth[503] ?: exth[100] ?: pdbName.ifBlank { null } ?: mobi.nameWithoutExtension
 
-        // 文本记录（HTML），逐条解压后拼接
+        // 文本记录（HTML），逐条解压后拼接（流式：每条读完即弃）
         var textRecords = textRecordCount
         if (textRecords <= 0 || textRecords > numRecords - 1) textRecords = numRecords - 1
         val html = StringBuilder()
@@ -59,11 +93,24 @@ object MobiParser {
                 )
             }
             html.append(text)
+            if (html.length > MAX_HTML_CHARS) {
+                throw IllegalStateException("MOBI 文本记录过大（纯文字书不支持）")
+            }
         }
 
+        // 修复（05-中3 补齐）：MOBI 解压产物同样受解压预算约束（累计 2GB / 2 万条）
+        val budget = ExtractBudget()
         val out = mutableListOf<File>()
         var idx = 0
         val seen = mutableSetOf<Int>()
+
+        fun savePage(img: ByteArray) {
+            idx++
+            budget.addEntry()
+            budget.addBytes(img.size.toLong())
+            out += File(pagesDir, "page-${idx.toString().padStart(3, '0')}.${imageExt(img)}")
+                .apply { writeBytes(img) }
+        }
 
         // 主路径：按文档顺序取 <img recindex="N">（N 为 1-based 记录号）
         val recindex = Regex(
@@ -74,18 +121,14 @@ object MobiParser {
             val ri = (m.groupValues[1].toIntOrNull() ?: continue) - 1
             if (ri < 0 || ri >= numRecords || !seen.add(ri)) continue
             val img = extractImage(record(ri)) ?: continue
-            idx++
-            out += File(pagesDir, "page-${idx.toString().padStart(3, '0')}.${imageExt(img)}")
-                .apply { writeBytes(img) }
+            savePage(img)
         }
 
         // 兜底：没找到 recindex 时，按记录顺序扫描图片签名
         if (out.isEmpty()) {
             for (i in (textRecords + 1) until numRecords) {
                 val img = extractImage(record(i)) ?: continue
-                idx++
-                out += File(pagesDir, "page-${idx.toString().padStart(3, '0')}.${imageExt(img)}")
-                    .apply { writeBytes(img) }
+                savePage(img)
             }
         }
 

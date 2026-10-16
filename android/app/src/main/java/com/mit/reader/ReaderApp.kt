@@ -2000,7 +2000,7 @@ class ReaderApp : Application() {
                     RemotePairResult(token, localDeviceId, Build.MODEL, controllerEndpoint.isBlank())
                 }
             },
-            remoteHeartbeat = { token -> remoteControl.heartbeat(token) },
+            remoteHeartbeat = { token, intent -> remoteControl.heartbeat(token, intent) },
             remoteCommand = { token, action, requestId ->
                 remoteControl.executeCommand(token, action, requestId)
             },

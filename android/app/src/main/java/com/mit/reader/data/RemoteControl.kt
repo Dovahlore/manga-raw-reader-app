@@ -82,6 +82,12 @@ class RemoteControlManager(
     private var lastPairRejectReason: String? = null
     private val suspendedUntil = mutableMapOf<String, Long>()
     private var acceptedControllerId: String? = null
+    // 修复（03 区启发式替代）：对端声明的心跳意图（control=遥控会话 / probe=探活 / null=旧版未声明）
+    // 与 control 心跳连击数——Consent 据此弹窗（连续 2 次 control=真遥控请求），不再靠 8 秒猜
+    var sessionIntent by mutableStateOf<String?>(null)
+        private set
+    var controlBeats by mutableStateOf(0)
+        private set
 
     init {
         appScope.launch {
@@ -101,6 +107,8 @@ class RemoteControlManager(
                 connectedControllerName = null
                 connectedControllerId = null
                 acceptedControllerId = null
+                sessionIntent = null
+                controlBeats = 0
                 readerHandler = null
                 readerSnapshot = null
             }
@@ -116,6 +124,8 @@ class RemoteControlManager(
             connectedControllerName = null
             connectedControllerId = null
             acceptedControllerId = null
+            sessionIntent = null
+            controlBeats = 0
         }
     }
 
@@ -154,6 +164,8 @@ class RemoteControlManager(
         acceptedControllerId = null
         // 修复（03-高2 残留）：新配对会话即 pending——同步收回翻页能力，不等 Consent 下一帧压制
         readerInteractionAllowed = false
+        sessionIntent = "pair"
+        controlBeats = 0
         lastSeenAt = System.currentTimeMillis()
         lastPairRejectReason = null
         token
@@ -165,7 +177,7 @@ class RemoteControlManager(
     private fun isSuspendedInternal(deviceId: String): Boolean =
         (suspendedUntil[deviceId] ?: 0L) > System.currentTimeMillis()
 
-    fun heartbeat(token: String): RemoteHostStatus = synchronized(lock) {
+    fun heartbeat(token: String, intent: String = ""): RemoteHostStatus = synchronized(lock) {
         val reader = readerSnapshot
         val authorized = authorizedController(token)
         if (authorized == null) {
@@ -179,6 +191,9 @@ class RemoteControlManager(
         if (!hostEnabled || !acceptController(authorized)) {
             return RemoteHostStatus(false, "遥控器未授权或已断开", false, null)
         }
+        // 修复（03 区启发式替代）：记录意图与 control 连击；探活（probe）不计数、不触发弹窗
+        sessionIntent = intent.ifBlank { null }
+        if (sessionIntent == "control") controlBeats += 1
         lastSeenAt = System.currentTimeMillis()
         RemoteHostStatus(
             ok = true,
@@ -317,6 +332,8 @@ class RemoteControlManager(
             pairingToken = ""
             connectedControllerName = null
             connectedControllerId = null
+            sessionIntent = null
+            controlBeats = 0
         }
     }
 
@@ -332,6 +349,8 @@ class RemoteControlManager(
                 connectedControllerName = null
                 connectedControllerId = null
                 acceptedControllerId = null
+                sessionIntent = null
+                controlBeats = 0
             }
         }
     }
@@ -354,6 +373,8 @@ class RemoteControlManager(
         if (activeControllerId == null || activeControllerId != device.deviceId) {
             // 修复（03-高2 残留）：换控制器连入=新会话，同步收回翻页能力待 Consent 重新确认
             readerInteractionAllowed = false
+            controlBeats = 0
+            sessionIntent = null
         }
         connectedControllerName = device.name.ifBlank { "遥控器" }.take(40)
         connectedControllerId = device.deviceId

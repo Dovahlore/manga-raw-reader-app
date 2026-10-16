@@ -58,9 +58,11 @@ class RemoteControlClient {
         }
     }
 
-    fun heartbeat(device: DiscoveredDevice, token: String): RemoteHostStatus {
+    fun heartbeat(device: DiscoveredDevice, token: String, intent: String = "control"): RemoteHostStatus {
         val json = post(device, "/remote/heartbeat") {
             put("token", token)
+            // 修复（03 区启发式替代）：声明心跳意图——control=遥控会话；探活/认回复用方传 probe
+            put("intent", intent)
         }
         return RemoteHostStatus(
             ok = json.optBoolean("ok"),

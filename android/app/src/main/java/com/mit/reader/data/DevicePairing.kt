@@ -57,7 +57,9 @@ fun reconcileDiscoveredDevices(
         candidates.forEach candidate@{ candidate ->
             // 修复（02-高3）：devid 不匹配的候选一律不发凭据（fail-closed），防冒名设备收集配对凭据
             if (candidate.devid == null || candidate.devid != record.deviceId) return@candidate
-            val status = runCatching { verifyClient.heartbeat(candidate, record.token) }
+            // 修复（03 区启发式替代）：探活/认回心跳声明 probe 意图——被控端不再把它当遥控请求，
+            // 也不会因为探活弹「遥控请求」确认窗（替代旧的 8 秒存活启发式判断）
+            val status = runCatching { verifyClient.heartbeat(candidate, record.token, intent = "probe") }
                 .getOrNull() ?: return@candidate
             if (status.ok) {
                 updates += record.copy(host = candidate.host, port = candidate.port)

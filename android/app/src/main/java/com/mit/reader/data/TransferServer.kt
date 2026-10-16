@@ -45,7 +45,7 @@ class TransferServer(
         controllerId: String,
         controllerEndpoint: String,
     ) -> RemotePairResult?,
-    private val remoteHeartbeat: (token: String) -> RemoteHostStatus,
+    private val remoteHeartbeat: (token: String, intent: String) -> RemoteHostStatus,
     private val remoteCommand: (token: String, action: RemotePageAction, requestId: String) -> RemoteCommandAck,
     private val isTransferAuthorized: (token: String) -> Boolean,
     /** 最近一次 pair 被拒原因（宿主本地诊断）——透传给控制端，锁定/未开被控不再只有通用文案。 */
@@ -255,7 +255,9 @@ class TransferServer(
 
     private fun handleRemoteHeartbeat(session: IHTTPSession): Response {
         val body = JSONObject(readBody(session))
-        return jsonResponse(body.optString("token").let(remoteHeartbeat).toJson())
+        // 修复（03 区启发式替代）：透传心跳意图——control=遥控会话（触发确认弹窗）、
+        // probe=探活/换 IP 认回（不触发）、空=旧版对端未声明（被控端回落 8 秒存活启发式）
+        return jsonResponse(remoteHeartbeat(body.optString("token"), body.optString("intent", "")).toJson())
     }
 
     private fun handleRemoteCommand(session: IHTTPSession): Response {

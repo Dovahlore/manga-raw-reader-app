@@ -1344,7 +1344,9 @@ async def upsert_book(body: dict, owner: str = Depends(get_owner)):
 async def list_books(owner: str = Depends(get_owner)):
     return {"books": await run_in_threadpool(
         db.query, "SELECT b.*, "
-                  "(SELECT COUNT(*) FROM pages p WHERE p.book_id=b.id) AS translated_pages, "
+                  # 修复（04-H2 口径）：translated_pages 只数 done——pending/running 占位行
+                  # （04-H2 崩溃恢复机制引入）不再被计入，避免未翻的书显示"已翻 N 页"虚高
+                  "(SELECT COUNT(*) FROM pages p WHERE p.book_id=b.id AND p.status='done') AS translated_pages, "
                   "(SELECT COUNT(*) FROM pages p WHERE p.book_id=b.id AND p.status='done') AS done_pages, "
                   "(SELECT COUNT(*) FROM pages p WHERE p.book_id=b.id AND p.status='failed') AS failed_pages, "
                   "(SELECT COUNT(*) FROM jobs j WHERE j.book_id=b.id AND j.status IN ('queued','running')) AS active_jobs, "

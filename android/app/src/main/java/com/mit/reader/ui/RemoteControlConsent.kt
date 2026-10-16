@@ -116,12 +116,15 @@ fun RemoteControlConsentHost(app: ReaderApp) {
         }
     }
 
-    // ---- 会话边界检测：连入后存活超过分界时长才视为真实遥控请求，弹窗确认 ----
+    // ---- 会话边界检测：协议级意图（intent）优先，旧版对端回落 8 秒存活启发式 ----
     // 修复（03-中7）：「是否已接受/是否同一会话」全部改用 controllerId 判定（名字仅用于展示），
     // pending 判定用 pending 状态本身。不拿 sessionPhase() 当「已同意」用：manager 级 accepted
     // 由心跳即置位（已配对凭据一连入就 accepted），用它判定会让已配对回连/新配对会话跳过弹窗，
     // 同名绕过的修复必须落在 id 身份对比上。
-    LaunchedEffect(app.remoteControl.connectedControllerName) {
+    // 修复（03 区启发式替代）：新版对端心跳携带 intent——control=遥控会话（连续 2 次即弹窗，
+    // 兼探活的 2s 心跳节奏），probe=探活/认回（永不弹窗），pair=配对回弹（不弹）；
+    // intent 缺失（旧版对端）才回落原 8 秒存活启发式。
+    LaunchedEffect(app.remoteControl.connectedControllerName, app.remoteControl.sessionIntent, app.remoteControl.controlBeats) {
         val name = app.remoteControl.connectedControllerName
         if (name == null) {
             // 会话结束（对方断开/静默超时/本机拒绝）：清理弹窗、通知与接受态
@@ -142,7 +145,11 @@ fun RemoteControlConsentHost(app: ReaderApp) {
             if (deniedAt != null && System.currentTimeMillis() - deniedAt < DENY_COOLDOWN_MS) {
                 // 刚拒绝过同一设备：直接掐断，防止其凭已保存授权自动重连回来
                 app.disconnectRemoteHostController()
-            } else {
+            } else if (app.remoteControl.sessionIntent == "control" && app.remoteControl.controlBeats >= 2) {
+                // 协议级：对端明确声明遥控意图且连续两次心跳——立即弹窗，不再等 8 秒
+                pending = ConsentRequest(name, System.currentTimeMillis())
+            } else if (app.remoteControl.sessionIntent == null) {
+                // 旧版对端（心跳无 intent 字段）：维持 8 秒存活启发式
                 delay(CONTROL_REQUEST_SURVIVE_MS)
                 // 分界时长后仍是同一台设备（id 相同）且未被接受过，才弹窗
                 if (controllerId != null &&
@@ -152,6 +159,7 @@ fun RemoteControlConsentHost(app: ReaderApp) {
                     pending = ConsentRequest(name, System.currentTimeMillis())
                 }
             }
+            // intent=="probe"/"pair"：探活/配对回弹，不弹窗
         }
     }
 
