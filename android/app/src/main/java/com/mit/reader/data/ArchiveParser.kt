@@ -2,6 +2,7 @@ package com.mit.reader.data
 
 import be.stef.rar.Unrar5j
 import java.io.File
+import java.nio.charset.Charset
 import java.io.InputStream
 import java.io.OutputStream
 import java.io.PrintStream
@@ -71,20 +72,26 @@ object ArchiveParser {
                 tmp.deleteRecursively()   // 图片是被 move 走的，剩下的残渣连 tmp 一起清
             }
         } else {
-            ZipFile(pack).use { zip ->
+            // 修复（05-低8）：条目名先按 UTF-8 解码扫一遍（现状行为）；一个图片条目都没有时
+            // 再用 GBK 重试一遍（Windows 压缩工具常以 GBK 打包且不标 UTF-8 位），取图片条目
+            // 非空的那一遍结果。两轮都只读中央目录，数据仍按需解压，预算逻辑不变。
+            var zip = ZipFile(pack)
+            var byRel = zipImageEntries(zip)
+            if (byRel.isEmpty()) {
+                zip.close()
+                zip = ZipFile(pack, Charset.forName("GBK"))
+                byRel = zipImageEntries(zip)
+            }
+            zip.use { zf ->
                 // 有的打包工具用反斜杠存路径（BookA\001.jpg），归一化成 / 才能正确分组；
-                // 取流时仍要用原始条目名，所以留一张 归一化名 -> 条目 的映射
-                val byRel = LinkedHashMap<String, ZipEntry>()
-                zip.entries().asSequence()
-                    .filter { !it.isDirectory && isImage(it.name) }
-                    .forEach { byRel[it.name.replace('\\', '/')] = it }
+                // 取流时仍要用原始条目名，所以留一张 归一化名 -> 条目 的映射（见 zipImageEntries）
                 val rels = byRel.keys.sortedWith { a, b -> naturalCompare(a, b) }.toList()
                 require(rels.isNotEmpty()) { "压缩包里没找到图片（支持 jpg/png/webp/gif/bmp/avif）" }
                 requireExtractBudget(rels.size)
                 groupsOf(rels, pack.nameWithoutExtension).forEachIndexed { gi, group ->
                     books += writeGroup(outRoot, gi, group) { relPath, dest ->
                         val e = byRel[relPath] ?: return@writeGroup false
-                        writeStream(zip.getInputStream(e), dest, budget) != null
+                        writeStream(zf.getInputStream(e), dest, budget) != null
                     }
                 }
             }
@@ -168,6 +175,17 @@ object ArchiveParser {
                 System.setOut(realOut)
                 System.setErr(realErr)
             }
+            // 修复（05-低4 防线）：unrar5j 封装对含 "../" 条目的解包行为无法离线核实，解完后
+            // 按结果断言——任何产物 canonicalPath 跳出 tmpDir（软链接/别名解析后仍在界内才放行）
+            // 就整包删除并中止导入，不让越界文件存活
+            val base = tmpDir.canonicalPath + File.separator
+            tmpDir.walkTopDown().forEach { f ->
+                val cp = f.canonicalPath
+                if (cp != tmpDir.canonicalPath && !cp.startsWith(base)) {
+                    tmpDir.deleteRecursively()
+                    throw IllegalStateException("RAR 解包越界，已中止")
+                }
+            }
         }
     }
 
@@ -177,6 +195,15 @@ object ArchiveParser {
     }
 
     // ---------------------------------------------------------------- 内部
+
+    /** 收集 ZIP 图片条目（05-低8 抽出）：归一化名（\→/）→ 条目，供排序分组与按需取流。 */
+    private fun zipImageEntries(zip: ZipFile): LinkedHashMap<String, ZipEntry> {
+        val byRel = LinkedHashMap<String, ZipEntry>()
+        zip.entries().asSequence()
+            .filter { !it.isDirectory && isImage(it.name) }
+            .forEach { byRel[it.name.replace('\\', '/')] = it }
+        return byRel
+    }
 
     private fun rel(base: File, f: File): String = f.relativeTo(base).path.replace('\\', '/')
 

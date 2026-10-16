@@ -282,9 +282,14 @@ class RemoteControlManager(
         }
     }
 
+    /** 修复（03-中7）：当前连入控制器的稳定 id，供 Consent 层做 id 级接受判定（名字仅用于展示）。 */
+    /** 修复（03-中7）：当前连入控制器的稳定 id，供 Consent 层做 id 级接受判定（名字仅用于展示）。 */
     fun clearReaderInteractionAllowed() {
         readerInteractionAllowed = false
     }
+
+    /** 当前连入控制器 id（Consent 冷却/接受态写入用）。 */
+    fun currentControllerId(): String? = synchronized(lock) { connectedControllerId }
 
     fun dispatchLocalCommand(action: RemotePageAction): RemoteReaderSnapshot? {
         val handler = synchronized(lock) { readerHandler } ?: return null
@@ -345,6 +350,9 @@ class RemoteControlManager(
         connectedControllerName = device.name.ifBlank { "遥控器" }.take(40)
         connectedControllerId = device.deviceId
         acceptedControllerId = device.deviceId
+        // 修复（03-低13）：更新 connectedControllerName 的同时对齐 lastSeenAt，
+        // 防止静默清扫用陈旧时间误清刚接受的会话
+        lastSeenAt = System.currentTimeMillis()
         return true
     }
 

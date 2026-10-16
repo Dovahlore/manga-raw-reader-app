@@ -32,6 +32,8 @@ class TransferClient(
     private val multicastLock = wifiManager.createMulticastLock("mit:discovery").apply { setReferenceCounted(false) }
     private val mainHandler = Handler(Looper.getMainLooper())
     private val devices = java.util.concurrent.ConcurrentHashMap<String, DiscoveredDevice>()
+    // 修复（05-中5）：断点续传会话缓存——键 host:port，值 (sessionId, 记录时间戳)
+    private val lastSessionByDevice = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -90,39 +92,92 @@ class TransferClient(
         cancelled: () -> Boolean = { false },
     ): JSONObject {
         val base = "http://${device.host}:${device.port}"
+        val deviceKey = "${device.host}:${device.port}"
         onStage("正在建立会话…")
-        val plan = postSession(base, token, manifestJson)
-        if (plan.optBoolean("existed", false)) {
-            throw PeerHasBookException()
+
+        // 修复（05-中5）：30 分钟内对同一 host:port 有未完成会话时，先拿旧 sessionId 对首个文件
+        // 做 GET offset 探测；探测成功直接续传，探测失败（400/未知会话）才回退新建 /session
+        var reusedSessionId: String? = null
+        val cached = lastSessionByDevice[deviceKey]
+        val firstRelPath = files.firstOrNull()?.relPath
+        if (cached != null && firstRelPath != null) {
+            if (System.currentTimeMillis() - cached.second <= 30L * 60 * 1000 &&
+                probeSessionAlive(base, token, cached.first, firstRelPath)
+            ) {
+                reusedSessionId = cached.first
+                onStage("发现上次未完成的传输，正在续传…")
+            } else {
+                lastSessionByDevice.remove(deviceKey, cached)
+            }
         }
-        if (!plan.optBoolean("spaceOk", true)) {
-            throw IllegalStateException("对端空间不足（需约 ${formatBytes(plan.optLong("requiredBytes", 0))}）")
+
+        val sessionId: String
+        val toSend: List<TransferFileEntry>
+        if (reusedSessionId != null) {
+            // 复用会话：清单已在接收端校验过，全量探测、逐文件跳过已完成部分
+            sessionId = reusedSessionId
+            toSend = files
+        } else {
+            val plan = postSession(base, token, manifestJson)
+            if (plan.optBoolean("existed", false)) {
+                throw PeerHasBookException()
+            }
+            if (!plan.optBoolean("spaceOk", true)) {
+                throw IllegalStateException("对端空间不足（需约 ${formatBytes(plan.optLong("requiredBytes", 0))}）")
+            }
+            val newSessionId = plan.getString("sessionId")
+            val need = plan.optJSONArray("need") ?: JSONArray()
+            val needSet = (0 until need.length()).map { need.getString(it) }.toSet()
+            // 修复（05-中5）：新会话成功建立后写入复用表
+            lastSessionByDevice[deviceKey] = Pair(newSessionId, System.currentTimeMillis())
+            sessionId = newSessionId
+            toSend = files.filter { it.relPath in needSet }
         }
-        val sessionId = plan.getString("sessionId")
-        val need = plan.optJSONArray("need") ?: JSONArray()
-        val needSet = (0 until need.length()).map { need.getString(it) }.toSet()
-        val toSend = files.filter { it.relPath in needSet }
         val totalBytes = toSend.sumOf { it.size }
         var sent = 0L
 
-        toSend.forEach { entry ->
-            if (cancelled()) throw java.util.concurrent.CancellationException("发送已取消")
-            val offset = getOffset(base, token, sessionId, entry.relPath)
-            if (offset >= entry.size) {
-                sent += entry.size
-                onProgress(sent, totalBytes)
-                return@forEach
+        try {
+            toSend.forEach { entry ->
+                if (cancelled()) throw java.util.concurrent.CancellationException("发送已取消")
+                val offset = getOffset(base, token, sessionId, entry.relPath)
+                if (offset >= entry.size) {
+                    sent += entry.size
+                    onProgress(sent, totalBytes)
+                    return@forEach
+                }
+                putFile(base, token, sessionId, entry, offset, onDelta = { delta ->
+                    sent += delta
+                    onProgress(sent, totalBytes)
+                }, cancelled = cancelled)
             }
-            putFile(base, token, sessionId, entry, offset, onDelta = { delta ->
-                sent += delta
-                onProgress(sent, totalBytes)
-            }, cancelled = cancelled)
+        } catch (e: java.util.concurrent.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (reusedSessionId == null) throw e
+            // 修复（05-中5）配套：复用会话与本次清单不匹配（对端已清理/文件表不符）时
+            // 作废缓存，回退新建会话整轮重试一次
+            lastSessionByDevice.remove(deviceKey)
+            onStage("续传会话已失效，正在重新建立会话…")
+            return send(device, token, manifestJson, files, onStage, onProgress, cancelled)
         }
 
         onStage("正在校验并导入…")
         val result = postComplete(base, token, sessionId)
         onProgress(totalBytes, totalBytes)
         return result
+    }
+
+    /** 修复（05-中5）：探测旧会话是否仍有效——GET offset 命中即视为可续传；400/未知会话返回 false。 */
+    /** 修复（05-中5）：探测旧会话是否仍有效——GET offset 命中即视为可续传；400/未知会话返回 false。 */
+    /** 修复（05-中5）：探测旧会话是否仍有效——GET offset 命中即视为可续传；400/未知会话返回 false。 */
+    private fun probeSessionAlive(base: String, token: String, sessionId: String, relPath: String): Boolean {
+        val req = Request.Builder().url("$base/files/$sessionId/$relPath/offset")
+            .header("Authorization", "Bearer $token")
+            .get()
+            .build()
+        return runCatching {
+            client.newCall(req).execute().use { resp -> resp.isSuccessful }
+        }.getOrDefault(false)
     }
 
     private fun postSession(base: String, token: String, manifestJson: String): JSONObject {

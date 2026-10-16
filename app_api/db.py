@@ -8,6 +8,7 @@ import hashlib
 import queue
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pymysql
@@ -73,6 +74,50 @@ def execute(sql, args=None):
         with conn.cursor() as cur:
             cur.execute(sql, args or ())
             return cur.lastrowid, cur.rowcount
+    finally:
+        _release(conn)
+
+
+@contextmanager
+def tx():
+    """单连接显式事务（修复 01-中7）：块内多条语句原子提交，异常整体回滚。"""
+    conn = _acquire()
+    try:
+        conn.begin()
+        try:
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+    finally:
+        _release(conn)
+
+
+def get_lock(key: str, timeout: int = 5):
+    """MySQL GET_LOCK（会话级，修复 04-L2）：成功返回独占的持有连接，失败/出错返回 None。
+
+    返回的连接在调 release_lock(conn, key) 前不可归还池中复用（GET_LOCK 绑定会话）。
+    """
+    conn = _acquire()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT GET_LOCK(%s, %s) AS got", (key, timeout))
+            if cur.fetchone()["got"] == 1:
+                return conn
+    except Exception:      # noqa: BLE001
+        pass
+    _release(conn)
+    return None
+
+
+def release_lock(conn, key: str) -> None:
+    """释放 get_lock 拿到的连接锁并归还连接池。"""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT RELEASE_LOCK(%s)", (key,))
+    except Exception:      # noqa: BLE001
+        pass
     finally:
         _release(conn)
 

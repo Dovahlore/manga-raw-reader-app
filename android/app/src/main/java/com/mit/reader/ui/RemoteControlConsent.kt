@@ -25,9 +25,12 @@ import com.mit.reader.MainActivity
 import com.mit.reader.ReaderApp
 import kotlinx.coroutines.delay
 
-/** 跨页面共享的遥控会话状态：acceptedControllerName 非空 = 本机已被弹窗确认、正处于被遥控中。 */
+/** 跨页面共享的遥控会话状态：acceptedControllerId 非空且等于当前连入控制器 = 本机已被弹窗确认、正处于被遥控中；名字仅用于展示。 */
 object RemoteControlUi {
     var acceptedControllerName by mutableStateOf<String?>(null)
+
+    // 修复（03-中7）：接受态以稳定 id 跟踪，同名设备不再串态
+    var acceptedControllerId by mutableStateOf<String?>(null)
 }
 
 /**
@@ -89,9 +92,16 @@ fun RemoteControlConsentHost(app: ReaderApp) {
     val context = LocalContext.current
     var pending by remember { mutableStateOf<ConsentRequest?>(null) }
     val deniedAtByName = remember { mutableStateMapOf<String, Long>() }
+    // 修复（02-中8/03-中7）：拒绝冷却同步记 id，判定优先 id，名字仅作兜底
+    val deniedAtById = remember { mutableStateMapOf<String, Long>() }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { }
+    ) { granted ->
+        // 修复（03-低11）：接受会话后授权成功的当下立即补发「正在被遥控」通知
+        if (granted && RemoteControlUi.acceptedControllerName != null) {
+            postControlledNotification(context, RemoteControlUi.acceptedControllerName!!)
+        }
+    }
 
     // ---- 被控接受态保活：挂载时立即开启，之后每分钟静默续期（重置旧 5 分钟自动关闭计时）----
     LaunchedEffect(Unit) {
@@ -107,6 +117,10 @@ fun RemoteControlConsentHost(app: ReaderApp) {
     }
 
     // ---- 会话边界检测：连入后存活超过分界时长才视为真实遥控请求，弹窗确认 ----
+    // 修复（03-中7）：「是否已接受/是否同一会话」全部改用 controllerId 判定（名字仅用于展示），
+    // pending 判定用 pending 状态本身。不拿 sessionPhase() 当「已同意」用：manager 级 accepted
+    // 由心跳即置位（已配对凭据一连入就 accepted），用它判定会让已配对回连/新配对会话跳过弹窗，
+    // 同名绕过的修复必须落在 id 身份对比上。
     LaunchedEffect(app.remoteControl.connectedControllerName) {
         val name = app.remoteControl.connectedControllerName
         if (name == null) {
@@ -114,19 +128,26 @@ fun RemoteControlConsentHost(app: ReaderApp) {
             if (RemoteControlUi.acceptedControllerName != null || pending != null) {
                 cancelControlledNotification(context)
             }
+            RemoteControlUi.acceptedControllerId = null
             RemoteControlUi.acceptedControllerName = null
             pending = null
             // 修复（03-高2 残留）：会话结束立即收回远端翻页能力，不再依赖下一轮 500ms 压制
             app.remoteControl.clearReaderInteractionAllowed()
-        } else if (name != RemoteControlUi.acceptedControllerName && pending?.controllerName != name) {
-            val deniedAt = deniedAtByName[name]
+        } else if (RemoteControlUi.acceptedControllerId != app.remoteControl.currentControllerId() &&
+            pending == null
+        ) {
+            val controllerId = app.remoteControl.currentControllerId()
+            // 冷却判定优先 id，名字兜底（旧数据）
+            val deniedAt = controllerId?.let { deniedAtById[it] } ?: deniedAtByName[name]
             if (deniedAt != null && System.currentTimeMillis() - deniedAt < DENY_COOLDOWN_MS) {
                 // 刚拒绝过同一设备：直接掐断，防止其凭已保存授权自动重连回来
                 app.disconnectRemoteHostController()
             } else {
                 delay(CONTROL_REQUEST_SURVIVE_MS)
-                if (app.remoteControl.connectedControllerName == name &&
-                    RemoteControlUi.acceptedControllerName == null
+                // 分界时长后仍是同一台设备（id 相同）且未被接受过，才弹窗
+                if (controllerId != null &&
+                    app.remoteControl.currentControllerId() == controllerId &&
+                    RemoteControlUi.acceptedControllerId != controllerId
                 ) {
                     pending = ConsentRequest(name, System.currentTimeMillis())
                 }
@@ -135,21 +156,22 @@ fun RemoteControlConsentHost(app: ReaderApp) {
     }
 
     // ---- 接受前压制翻页能力：未接受的会话每 500ms 重申一次，覆盖 resume/pause 路径的覆写 ----
-    LaunchedEffect(pending, RemoteControlUi.acceptedControllerName, app.remoteControl.connectedControllerName) {
+    // 修复（03-中7）：压制/放行按 id 判定（acceptedControllerId 是否等于当前连入控制器）
+    LaunchedEffect(pending, RemoteControlUi.acceptedControllerId, app.remoteControl.connectedControllerName) {
         val session = app.remoteControl.connectedControllerName
-        if (session != null && RemoteControlUi.acceptedControllerName != session) {
+        if (session != null && RemoteControlUi.acceptedControllerId != app.remoteControl.currentControllerId()) {
             while (true) {
                 app.remoteControl.updateReaderInteractionAllowed(false)
                 delay(500)
             }
-        } else if (RemoteControlUi.acceptedControllerName != null) {
+        } else if (RemoteControlUi.acceptedControllerId != null) {
             app.remoteControl.updateReaderInteractionAllowed(app.readerScreenActive)
         }
     }
 
     // ---- 阅读器进出时，已接受的会话要跟随刷新 ----
     LaunchedEffect(app.readerScreenActive) {
-        if (RemoteControlUi.acceptedControllerName != null && pending == null) {
+        if (RemoteControlUi.acceptedControllerId != null && pending == null) {
             app.remoteControl.updateReaderInteractionAllowed(app.readerScreenActive)
         }
     }
@@ -162,6 +184,8 @@ fun RemoteControlConsentHost(app: ReaderApp) {
             confirmButton = {
                 TextButton(onClick = {
                     pending = null
+                    // 修复（03-中7）：接受态写入 manager 当前连入控制器的稳定 id，名字仅展示
+                    RemoteControlUi.acceptedControllerId = app.remoteControl.currentControllerId()
                     RemoteControlUi.acceptedControllerName = request.controllerName
                     app.remoteControl.updateReaderInteractionAllowed(app.readerScreenActive)
                     if (Build.VERSION.SDK_INT >= 33) {
@@ -173,6 +197,10 @@ fun RemoteControlConsentHost(app: ReaderApp) {
             dismissButton = {
                 TextButton(onClick = {
                     pending = null
+                    // 修复（02-中8/03-中7）：冷却写入点同步记 id，判定优先 id
+                    app.remoteControl.currentControllerId()?.let {
+                        deniedAtById[it] = System.currentTimeMillis()
+                    }
                     deniedAtByName[request.controllerName] = System.currentTimeMillis()
                     app.disconnectRemoteHostController()
                 }) { Text("拒绝") }

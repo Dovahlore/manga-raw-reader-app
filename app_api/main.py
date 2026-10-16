@@ -12,8 +12,10 @@ import base64
 import copy
 import hashlib
 import heapq
+import hmac
 import io
 import json
+import os
 import re
 import shutil
 import threading
@@ -116,6 +118,12 @@ async def _whole_book_worker() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _redis
+    # 修复 01-低5：空 Token = 全部端点裸奔（含 admin/删库路径）；未显式允许则拒绝启动
+    if not S.API_TOKEN and not os.getenv("MIT_ALLOW_EMPTY_TOKEN"):
+        raise RuntimeError("MIT_API_TOKEN 为空：拒绝启动；内网自用请显式设置 MIT_ALLOW_EMPTY_TOKEN=1")
+    # 修复 01-中8：管理令牌未设置时 admin 端点无额外保护，启动即警告
+    if not S.ADMIN_TOKEN:
+        print("[app-api] 警告：MIT_ADMIN_TOKEN 未设置，/v1/admin/* 无管理令牌保护", flush=True)
     S.CACHE_DIR.mkdir(parents=True, exist_ok=True)
     S.BOOKS_DIR.mkdir(parents=True, exist_ok=True)
     S.RELEASES_DIR.mkdir(parents=True, exist_ok=True)
@@ -255,9 +263,18 @@ app = FastAPI(title="mit-app-api", version="0.1.0", lifespan=lifespan)
 
 async def auth(x_api_token: Optional[str] = Header(default=None)):
     # 支持多账号：MIT_API_TOKEN 可用逗号分隔多个 Key，每个 Key 一个账号
+    # 修复 01-低5：改 hmac.compare_digest 常量时间比较，避免时序侧信道
     tokens = {t.strip() for t in S.API_TOKEN.split(",") if t.strip()}
-    if tokens and x_api_token not in tokens:
+    if tokens and not any(hmac.compare_digest(t.encode(), (x_api_token or "").encode())
+                          for t in tokens):
         raise HTTPException(401, detail="invalid X-API-Token")
+
+
+async def require_admin(x_admin_token: Optional[str] = Header(default=None)):
+    # 修复 01-中8：/v1/admin/* 独立管理令牌；MIT_ADMIN_TOKEN 未设置时放行（lifespan 有启动警告）
+    if S.ADMIN_TOKEN:
+        if not x_admin_token or not hmac.compare_digest(x_admin_token.encode(), S.ADMIN_TOKEN.encode()):
+            raise HTTPException(403, detail="invalid X-Admin-Token")
 
 
 _user_id_cache: Dict[str, str] = {}
@@ -290,6 +307,21 @@ def get_owner(x_api_token: Optional[str] = Header(default=None)) -> str:
     if not token:
         return "default"
     return _resolve_user_id(token)
+
+
+# ---------------------------------------------------------------- 请求体大小上限（修复 01-低4）
+MAX_PAGE_UPLOAD_BYTES = 50 * 1024 * 1024            # 单页翻译
+MAX_BOOK_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024      # 整书上传
+MAX_RELEASE_UPLOAD_BYTES = 1024 * 1024 * 1024       # APK 发布
+
+
+def _check_content_length(request: Request, limit: int, what: str) -> None:
+    # 有 Content-Length 就提前 413，不让超大请求体全量读进内存后才失败
+    value = request.headers.get("content-length") or ""
+    if not value.isdigit():
+        return
+    if int(value) > limit:
+        raise HTTPException(413, detail=f"{what}请求体超过 {limit // (1024 * 1024)}MB 限制")
 
 
 # ---------------------------------------------------------------- 工具函数
@@ -383,12 +415,36 @@ def _is_fatal_translator_error(error: Exception) -> bool:
     return any(marker in message for marker in markers)
 
 
+def _is_connection_error(error: Exception) -> bool:
+    # 修复 04-M5：连接类瞬时故障（引擎重启/DNS 抖动/超时）与配置类致命错误分开处理
+    message = str(error).lower()
+    markers = ("connection error", "name or service not known", "timed out")
+    return any(marker in message for marker in markers)
+
+
 def get_book_lock(book_id: str) -> asyncio.Lock:
     lock = _book_locks.get(book_id)
     if lock is None:
         lock = asyncio.Lock()
         _book_locks[book_id] = lock
     return lock
+
+
+async def _job_dedup_guard(book_id: str, action: str):
+    """修复 04-L2：查重+INSERT job 的互斥段（MySQL GET_LOCK，5s 拿不到 → 503）。
+
+    GET_LOCK 是会话级锁：锁定期间独占一条池连接，直到 finally 里成对释放。
+    """
+    key = f"mitjob:{book_id}:{action}"
+    conn = await run_in_threadpool(db.get_lock, key, 5)
+    if conn is None:
+        raise HTTPException(503, detail="job dedup lock busy, retry later")
+    return conn, key
+
+
+async def _job_dedup_release(conn, key: str) -> None:
+    if conn is not None:
+        await run_in_threadpool(db.release_lock, conn, key)
 
 
 async def call_engine(image_bytes: bytes, cfg: dict, include_background: bool = False) -> dict:
@@ -466,8 +522,9 @@ def engine_image_ok(engine_img: bytes, source: bytes) -> tuple[bool, str]:
 #       结构化结果 JSON 放 Redis（带 TTL，命中即省掉整条管线）。
 # Redis 挂了就当"没缓存"直接跑管线，不影响正确性。
 
-def _cache_key(img_sha: str, cfg_hash: str) -> str:
-    return f"mit:result:{img_sha}:{cfg_hash}"
+def _cache_key(owner: str, img_sha: str, cfg_hash: str) -> str:
+    # 修复 04-M2：键掺 owner，杜绝跨账号共享译文缓存
+    return f"mit:result:{owner}:{img_sha}:{cfg_hash}"
 
 
 async def cache_get(key: str) -> str | None:
@@ -729,7 +786,7 @@ async def usage(owner: str = Depends(get_owner)):
     return {"user_id": owner, "usage": row or {}}
 
 
-@app.get("/v1/admin/overview", dependencies=[Depends(auth)])
+@app.get("/v1/admin/overview", dependencies=[Depends(auth), Depends(require_admin)])
 async def admin_overview():
     """管理平台两模块：后端执行记录 + 用户记录（管理员专用）。"""
     # ---- 模块一：后端执行记录（引擎健康 + 最近任务 + 最近翻译页）----
@@ -798,6 +855,7 @@ async def dashboard_page():
 
 @app.post("/v1/pages/translate", dependencies=[Depends(auth)])
 async def translate_page(
+    request: Request,
     image: UploadFile = File(..., description="整页图片"),
     book_id: Optional[str] = Form(None),
     title: Optional[str] = Form(None),
@@ -816,6 +874,7 @@ async def translate_page(
     后台跑管线，App 用 GET /v1/jobs/{job_id} 看进度（done 后带 page_id）。
     """
     t0 = time.time()
+    _check_content_length(request, MAX_PAGE_UPLOAD_BYTES, "单页翻译")
     overrides: Dict[str, Any] = {}
     if config:
         try:
@@ -862,9 +921,9 @@ async def translate_page(
 
     img_sha = sha1_bytes(raw)
     cfg_hash = result_cache_hash(cfg, include_background)
-    cache_key = f"{img_sha}:{cfg_hash}"
+    cache_key = f"{owner}:{img_sha}:{cfg_hash}"   # 修复 04-M2：掺 owner 防跨账号缓存共享
     png_path = S.CACHE_DIR / f"{cache_key}.png"   # 图片缓存：本地磁盘
-    redis_key = _cache_key(img_sha, cfg_hash)     # 结构化结果缓存：Redis
+    redis_key = _cache_key(owner, img_sha, cfg_hash)  # 结构化结果缓存：Redis
 
     # ---- 任务登记（sync / async 共用，App 都能拿 job_id 看状态）----
     job_id = str(uuid.uuid4())
@@ -961,7 +1020,7 @@ async def _execute_translate(raw, cfg, owner, real_book_id, real_page_index, ord
                 page_id = await run_in_threadpool(
                     _persist_page, real_book_id, owner, real_page_index, order_dir, title, img_sha, cfg_hash,
                     raw, png_path.read_bytes(), payload, "done", 0, None, int((time.time() - t0) * 1000),
-                    payload.get("tokens"))
+                    payload.get("tokens"), False)
                 # 缓存命中的页也要登记上下文，否则同书下一页的 ctx 会静默退化成 none
                 dst_all = "\n".join(b["dst"] for b in payload.get("blocks", []) if b.get("dst"))
                 src_all = "\n".join(b["src"] for b in payload.get("blocks", []) if b.get("src"))
@@ -1025,7 +1084,8 @@ async def _execute_translate(raw, cfg, owner, real_book_id, real_page_index, ord
 
 
 def _persist_page(book_id, owner, page_index, order_dir, title, img_sha, cfg_hash, raw,
-                  out_bytes, payload, status, attempts, error, elapsed_ms, tokens) -> int:
+                  out_bytes, payload, status, attempts, error, elapsed_ms, tokens,
+                  bill: bool = True) -> int:
     # 修复 01-中5：书已删（墓碑）就拒绝落库，失败路径同样遵守，杜绝"删了又长回来"的幽灵书
     if _is_book_deleted(book_id):
         raise RuntimeError(f"book {book_id} deleted, skip persist")
@@ -1034,6 +1094,10 @@ def _persist_page(book_id, owner, page_index, order_dir, title, img_sha, cfg_has
         "ON DUPLICATE KEY UPDATE title=COALESCE(VALUES(title), title), "
         "order_dir=COALESCE(VALUES(order_dir), order_dir)",
         (book_id, title, order_dir, owner))
+    # 修复 01-中4：upsert 不更新 owner，落页前复查归属，防跨账号把页挂进他人书
+    brow = db.query_one("SELECT owner FROM books WHERE id=%s", (book_id,))
+    if brow and str(brow["owner"]) != str(owner):
+        raise RuntimeError(f"book {book_id} belongs to another owner")
     orig_path, out_path, json_path = page_paths(book_id, page_index)
     orig_path.parent.mkdir(parents=True, exist_ok=True)
     # 同步书（有 zip）的原图已经在 zip 里，不再重复落盘 orig.png（省空间）；原图按需从 zip 读
@@ -1044,47 +1108,51 @@ def _persist_page(book_id, owner, page_index, order_dir, title, img_sha, cfg_has
     if out_bytes:
         out_path.write_bytes(_to_webp_lossless(out_bytes))
     # result.json 只写不读（结构化结果在 page_blocks 表），不再落盘省空间
-    db.execute(
-        """INSERT INTO pages (book_id, page_index, order_dir, orig_sha1, config_hash,
-                              orig_path, out_path, json_path, status, attempts, error, elapsed_ms, tokens)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-           ON DUPLICATE KEY UPDATE
-             order_dir=COALESCE(VALUES(order_dir), order_dir),
-             orig_sha1=IF(VALUES(status)='done', VALUES(orig_sha1), orig_sha1),
-             config_hash=IF(VALUES(status)='done', VALUES(config_hash), config_hash),
-             orig_path=COALESCE(VALUES(orig_path), orig_path),
-             out_path=COALESCE(VALUES(out_path), out_path),
-             json_path=COALESCE(VALUES(json_path), json_path),
-             status=VALUES(status), attempts=attempts+VALUES(attempts), error=VALUES(error),
-             elapsed_ms=VALUES(elapsed_ms), tokens=VALUES(tokens)""",
-        (book_id, page_index, order_dir, img_sha, cfg_hash,
-         str(orig_path) if synced is None else None, str(out_path) if out_bytes else None,
-         None, status, attempts, error, elapsed_ms, tokens))
-    row = db.query_one("SELECT id FROM pages WHERE book_id=%s AND page_index=%s", (book_id, page_index))
-    page_id = row["id"]
-    if payload:
-        db.execute("DELETE FROM page_blocks WHERE page_id=%s", (page_id,))
-        for i, b in enumerate(payload.get("blocks", [])):
-            x1, y1, x2, y2 = (b.get("bbox") or [None, None, None, None])
-            db.execute(
-                """INSERT INTO page_blocks (page_id, idx, minx, miny, maxx, maxy, angle, prob,
-                                            fg, bg, src_text, dst_text)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (page_id, i, x1, y1, x2, y2, b.get("angle"), b.get("prob"),
-                 json.dumps(b.get("fg")), json.dumps(b.get("bg")), b.get("src"), b.get("dst")))
-    if status == "done":
-        # 用量统计：翻页 +1、累加 token、刷新最后活跃时间。
-        # 引擎暂未上报真实 token，用块原文+译文字符数粗估（日↔中 CJK ≈ 1 字符/token）。
-        est_tokens = tokens
-        if est_tokens is None and payload:
-            est_tokens = sum(
-                len(str(b.get("src") or "")) + len(str(b.get("dst") or ""))
-                for b in payload.get("blocks", [])
-            )
-        db.execute(
-            "UPDATE users SET page_count=page_count+1, token_used=token_used+COALESCE(%s,0), "
-            "last_active_at=NOW() WHERE id=%s",
-            (est_tokens, owner))
+    # 修复 01-中7：pages+blocks+计费同事务提交，中途失败整体回滚，不再留"半页"中间态
+    with db.tx() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO pages (book_id, page_index, order_dir, orig_sha1, config_hash,
+                                      orig_path, out_path, json_path, status, attempts, error, elapsed_ms, tokens)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   ON DUPLICATE KEY UPDATE
+                     order_dir=COALESCE(VALUES(order_dir), order_dir),
+                     orig_sha1=IF(VALUES(status)='done', VALUES(orig_sha1), orig_sha1),
+                     config_hash=IF(VALUES(status)='done', VALUES(config_hash), config_hash),
+                     orig_path=COALESCE(VALUES(orig_path), orig_path),
+                     out_path=COALESCE(VALUES(out_path), out_path),
+                     json_path=COALESCE(VALUES(json_path), json_path),
+                     status=VALUES(status), attempts=attempts+VALUES(attempts), error=VALUES(error),
+                     elapsed_ms=VALUES(elapsed_ms), tokens=VALUES(tokens)""",
+                (book_id, page_index, order_dir, img_sha, cfg_hash,
+                 str(orig_path) if synced is None else None, str(out_path) if out_bytes else None,
+                 None, status, attempts, error, elapsed_ms, tokens))
+            cur.execute("SELECT id FROM pages WHERE book_id=%s AND page_index=%s", (book_id, page_index))
+            page_id = cur.fetchone()["id"]
+            if payload:
+                cur.execute("DELETE FROM page_blocks WHERE page_id=%s", (page_id,))
+                for i, b in enumerate(payload.get("blocks", [])):
+                    x1, y1, x2, y2 = (b.get("bbox") or [None, None, None, None])
+                    cur.execute(
+                        """INSERT INTO page_blocks (page_id, idx, minx, miny, maxx, maxy, angle, prob,
+                                                    fg, bg, src_text, dst_text)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        (page_id, i, x1, y1, x2, y2, b.get("angle"), b.get("prob"),
+                         json.dumps(b.get("fg")), json.dumps(b.get("bg")), b.get("src"), b.get("dst")))
+            if bill and status == "done":
+                # 用量统计：翻页 +1、累加 token、刷新最后活跃时间。
+                # 引擎暂未上报真实 token，用块原文+译文字符数粗估（日↔中 CJK ≈ 1 字符/token）。
+                # 修复 04-L4：bill=False（缓存命中复用旧结果）不再重复计费。
+                est_tokens = tokens
+                if est_tokens is None and payload:
+                    est_tokens = sum(
+                        len(str(b.get("src") or "")) + len(str(b.get("dst") or ""))
+                        for b in payload.get("blocks", [])
+                    )
+                cur.execute(
+                    "UPDATE users SET page_count=page_count+1, token_used=token_used+COALESCE(%s,0), "
+                    "last_active_at=NOW() WHERE id=%s",
+                    (est_tokens, owner))
     return page_id
 
 
@@ -1195,6 +1263,10 @@ async def retranslate(page_id: int, body: Optional[dict] = None, owner: str = De
         if _is_book_deleted(row["book_id"]):
             raise HTTPException(404, detail="book deleted")
         img_bytes = base64.b64decode(data["image_b64"])
+        # 修复 01-低3：重译路径同样过白图/尺寸校验，坏图不得成为正式结果
+        ok_img, why = engine_image_ok(img_bytes, raw)
+        if not ok_img:
+            raise HTTPException(502, detail=why)
         blocks = normalize_blocks(data.get("result") or {}, cfg["translator"]["target_lang"],
                                   include_background=True)
         payload = {"blocks": blocks, "raw_result": data.get("result") or {},
@@ -1208,8 +1280,8 @@ async def retranslate(page_id: int, body: Optional[dict] = None, owner: str = De
         # 修复 01-中6：作废新旧两个配置的缓存键，防旧缓存把重译静默回滚
         for h in {pipeline_hash(cfg), row["config_hash"]}:
             if h:
-                await cache_delete(_cache_key(row["orig_sha1"], h))
-                (S.CACHE_DIR / (str(row["orig_sha1"]) + ":" + str(h) + ".png")).unlink(missing_ok=True)
+                await cache_delete(_cache_key(owner, row["orig_sha1"], h))
+                (S.CACHE_DIR / f"{owner}:{row['orig_sha1']}:{h}.png").unlink(missing_ok=True)
     return {"page_id": page_id, "status": "done", "attempts": row["attempts"] + 1,
             "orig_sha1": row["orig_sha1"], "book_id": row["book_id"], "page_index": row["page_index"],
             "blocks": [{k: v for k, v in b.items() if k != "background"} for b in blocks],
@@ -1261,16 +1333,19 @@ async def list_books(owner: str = Depends(get_owner)):
 
 
 @app.get("/v1/books/{book_id}/pages", dependencies=[Depends(auth)])
-async def book_pages(book_id: str, owner: str = Depends(get_owner)):
+async def book_pages(book_id: str, owner: str = Depends(get_owner), after_index: int = -1):
+    """修复 04-L5：LIMIT 5000 兜底；after_index 增量拉取（只返回 page_index 更大的页）。"""
     await _ensure_book_owner(book_id, owner)
     return {"book_id": book_id, "pages": await run_in_threadpool(
         db.query, "SELECT id, page_index, status, attempts, error, elapsed_ms, tokens, "
-                  "config_hash, updated_at FROM pages WHERE book_id=%s ORDER BY page_index",
-        (book_id,))}
+                  "config_hash, updated_at FROM pages WHERE book_id=%s AND page_index > %s "
+                  "ORDER BY page_index LIMIT 5000",
+        (book_id, after_index))}
 
 
 @app.post("/v1/books/translate-all", dependencies=[Depends(auth)])
 async def translate_all(
+    request: Request,
     book_id: str = Form(...),
     title: Optional[str] = Form(None),
     order_dir: Optional[str] = Form(None),
@@ -1286,6 +1361,7 @@ async def translate_all(
     返回 book_job_id 后，App 轮询 GET /v1/books/{book_id}/pages 看每页进度、下载译文图。
     已翻好的页会命中 L1 缓存（不会重跑管线），force=true 才强制重翻。
     """
+    _check_content_length(request, MAX_BOOK_UPLOAD_BYTES, "整书翻译")
     await _ensure_book_owner(book_id, owner)
     if not images:
         raise HTTPException(400, detail="no images")
@@ -1324,31 +1400,40 @@ async def translate_all(
         "format=COALESCE(VALUES(format),format), page_count=COALESCE(VALUES(page_count),page_count), "
         "order_dir=COALESCE(VALUES(order_dir),order_dir)",
         (book_id, title, None, page_count, order_dir, owner))
+    # 修复 01-中4：建书 upsert 后复查 owner，并发下他人已注册同 id 则中止，不把页/任务挂进他人书
+    owner_row = await run_in_threadpool(db.query_one, "SELECT owner FROM books WHERE id=%s", (book_id,))
+    if owner_row and str(owner_row["owner"]) != str(owner):
+        raise RuntimeError(f"book {book_id} belongs to another owner")
 
-    # 同一本书已存在活动任务：不重复建 job，直接返回已有的 job id（防云端/本地重复触发）
-    existing = await run_in_threadpool(
-        db.query_one,
-        "SELECT id FROM jobs WHERE book_id=%s AND owner=%s AND action='translate_all' "
-        "AND status IN ('queued','running') LIMIT 1", (book_id, owner))
-    if existing:
-        return {"book_job_id": existing["id"], "status": "queued", "duplicate": True}
+    # 修复 04-L2：查重+INSERT job 用 GET_LOCK 串行化，防并发双 job；5s 拿不到 → 503
+    _lk_conn, _lk_key = await _job_dedup_guard(book_id, "translate_all")
+    try:
+        # 同一本书已存在活动任务：不重复建 job，直接返回已有的 job id（防云端/本地重复触发）
+        existing = await run_in_threadpool(
+            db.query_one,
+            "SELECT id FROM jobs WHERE book_id=%s AND owner=%s AND action='translate_all' "
+            "AND status IN ('queued','running') LIMIT 1", (book_id, owner))
+        if existing:
+            return {"book_job_id": existing["id"], "status": "queued", "duplicate": True}
 
-    # 重翻这些页：把旧 failed 清回 pending，避免书库进度页继续显示上一轮的失败数
-    # （修复 04-M6：移到去重早退之后，命中去重时不再抹掉失败记录）
-    if indices:
-        ph = ",".join(["%s"] * len(indices))
+        # 重翻这些页：把旧 failed 清回 pending，避免书库进度页继续显示上一轮的失败数
+        # （修复 04-M6：移到去重早退之后，命中去重时不再抹掉失败记录）
+        if indices:
+            ph = ",".join(["%s"] * len(indices))
+            await run_in_threadpool(
+                db.execute,
+                f"UPDATE pages SET status='pending', error=NULL WHERE book_id=%s AND page_index IN ({ph}) AND status='failed'",
+                (book_id, *indices))
+
+        job_id = str(uuid.uuid4())
         await run_in_threadpool(
             db.execute,
-            f"UPDATE pages SET status='pending', error=NULL WHERE book_id=%s AND page_index IN ({ph}) AND status='failed'",
-            (book_id, *indices))
-
-    job_id = str(uuid.uuid4())
-    await run_in_threadpool(
-        db.execute,
-        "INSERT INTO jobs (id, owner, book_id, action, status, config_json) VALUES (%s,%s,%s,'translate_all','queued',%s)",
-        (job_id, owner, book_id, json.dumps(public_config(cfg), ensure_ascii=False)))
-    # 修复 04-H2：建 job 后先把本轮页落成 pending 行，App 崩溃恢复判定才有依据
-    await run_in_threadpool(_mark_pending_pages, book_id, owner, indices, order_dir)
+            "INSERT INTO jobs (id, owner, book_id, action, status, config_json) VALUES (%s,%s,%s,'translate_all','queued',%s)",
+            (job_id, owner, book_id, json.dumps(public_config(cfg), ensure_ascii=False)))
+        # 修复 04-H2：建 job 后先把本轮页落成 pending 行，App 崩溃恢复判定才有依据
+        await run_in_threadpool(_mark_pending_pages, book_id, owner, indices, order_dir)
+    finally:
+        await _job_dedup_release(_lk_conn, _lk_key)
     await _whole_book_queue.put(
         (job_id, lambda: _run_translate_all(job_id, owner, book_id, title, order_dir, cfg, indices, raws, force)))
     return {"book_job_id": job_id, "status": "queued", "total": len(raws)}
@@ -1374,6 +1459,7 @@ async def _run_translate_all(job_id, owner, book_id, title, order_dir, cfg, indi
     if not j or j["status"] != "running":
         return   # 排队期间被取消，直接退出
     cancelled = False
+    consecutive_failed = 0   # 修复 04-M5：连续 3 页失败熔断，中止整本
     try:
         for idx, raw in zip(indices, raws):
             # 书被删（删书/取消同步）就停：否则 _persist_page 会把已删的书又建回来
@@ -1388,9 +1474,9 @@ async def _run_translate_all(job_id, owner, book_id, title, order_dir, cfg, indi
                 break
             img_sha = sha1_bytes(raw)
             cfg_hash = pipeline_hash(cfg)
-            cache_key = f"{img_sha}:{cfg_hash}"
+            cache_key = f"{owner}:{img_sha}:{cfg_hash}"   # 修复 04-M2：掺 owner
             png_path = S.CACHE_DIR / f"{cache_key}.png"
-            redis_key = _cache_key(img_sha, cfg_hash)
+            redis_key = _cache_key(owner, img_sha, cfg_hash)
             # 修复 04-H2：页起步即写 running 行，进程被杀后恢复判定/进度页才有据可依
             await run_in_threadpool(_persist_page, book_id, owner, idx, order_dir, title, img_sha, cfg_hash, raw, None, None, "running", 0, None, 0, None)
 
@@ -1404,17 +1490,29 @@ async def _run_translate_all(job_id, owner, book_id, title, order_dir, cfg, indi
                     cfg_page["context_text"] = ctx_text
                     ctx_source = "db"
 
-            try:
-                await _execute_translate(raw, cfg_page, owner, book_id, idx, order_dir, title,
-                                         img_sha, cfg_hash, cache_key, png_path, redis_key,
-                                         ctx_source, False, force,
-                                         priority=_ENGINE_PRIORITY_WHOLE_BOOK)
-            except Exception as e:      # noqa: BLE001
-                await run_in_threadpool(
-                    _persist_page, book_id, owner, idx, order_dir, title, img_sha, cfg_hash,
-                    raw, None, None, "failed", 1, str(e)[:2000], 0, None)
-                if _is_fatal_translator_error(e):
-                    raise
+            # 修复 04-M5：连接类错误重试同页至多 2 次（5s/15s）；连续 3 页失败熔断中止整本
+            page_ok = False
+            for _retry in range(3):
+                try:
+                    await _execute_translate(raw, cfg_page, owner, book_id, idx, order_dir, title,
+                                             img_sha, cfg_hash, cache_key, png_path, redis_key,
+                                             ctx_source, False, force,
+                                             priority=_ENGINE_PRIORITY_WHOLE_BOOK)
+                    page_ok = True
+                    break
+                except Exception as e:      # noqa: BLE001
+                    if _retry < 2 and _is_connection_error(e):
+                        await asyncio.sleep(5 if _retry == 0 else 15)
+                        continue
+                    await run_in_threadpool(
+                        _persist_page, book_id, owner, idx, order_dir, title, img_sha, cfg_hash,
+                        raw, None, None, "failed", 1, str(e)[:2000], 0, None)
+                    consecutive_failed += 1
+                    if consecutive_failed >= 3 or _is_fatal_translator_error(e):
+                        raise
+                    break
+            if page_ok:
+                consecutive_failed = 0
         if not cancelled:
             await run_in_threadpool(db.execute,
                                     "UPDATE jobs SET status='done', finished_at=NOW() "
@@ -1467,30 +1565,35 @@ async def translate_all_from_zip(
     if any(i < 0 or i >= len(names) for i in indices):
         raise HTTPException(400, detail="page_indices 超出范围")
 
-    # 同一本书已存在活动任务：不重复建 job，直接返回已有的 job id（防云端/本地重复触发）
-    existing = await run_in_threadpool(
-        db.query_one,
-        "SELECT id FROM jobs WHERE book_id=%s AND owner=%s AND action='translate_all' "
-        "AND status IN ('queued','running') LIMIT 1", (book_id, owner))
-    if existing:
-        return {"book_job_id": existing["id"], "status": "queued", "duplicate": True}
+    # 修复 04-L2：查重+INSERT job 用 GET_LOCK 串行化，防并发双 job；5s 拿不到 → 503
+    _lk_conn, _lk_key = await _job_dedup_guard(book_id, "translate_all")
+    try:
+        # 同一本书已存在活动任务：不重复建 job，直接返回已有的 job id（防云端/本地重复触发）
+        existing = await run_in_threadpool(
+            db.query_one,
+            "SELECT id FROM jobs WHERE book_id=%s AND owner=%s AND action='translate_all' "
+            "AND status IN ('queued','running') LIMIT 1", (book_id, owner))
+        if existing:
+            return {"book_job_id": existing["id"], "status": "queued", "duplicate": True}
 
-    # 重翻这些页：把旧 failed 清回 pending，避免书库进度页继续显示上一轮的失败数
-    # （修复 04-M6：移到去重早退之后，命中去重时不再抹掉失败记录）
-    if indices:
-        ph = ",".join(["%s"] * len(indices))
+        # 重翻这些页：把旧 failed 清回 pending，避免书库进度页继续显示上一轮的失败数
+        # （修复 04-M6：移到去重早退之后，命中去重时不再抹掉失败记录）
+        if indices:
+            ph = ",".join(["%s"] * len(indices))
+            await run_in_threadpool(
+                db.execute,
+                f"UPDATE pages SET status='pending', error=NULL WHERE book_id=%s AND page_index IN ({ph}) AND status='failed'",
+                (book_id, *indices))
+
+        job_id = str(uuid.uuid4())
         await run_in_threadpool(
             db.execute,
-            f"UPDATE pages SET status='pending', error=NULL WHERE book_id=%s AND page_index IN ({ph}) AND status='failed'",
-            (book_id, *indices))
-
-    job_id = str(uuid.uuid4())
-    await run_in_threadpool(
-        db.execute,
-        "INSERT INTO jobs (id, owner, book_id, action, status, config_json) VALUES (%s,%s,%s,'translate_all','queued',%s)",
-        (job_id, owner, book_id, json.dumps(public_config(cfg), ensure_ascii=False)))
-    # 修复 04-H2：建 job 后先把本轮页落成 pending 行，App 崩溃恢复判定才有依据
-    await run_in_threadpool(_mark_pending_pages, book_id, owner, indices, order_dir)
+            "INSERT INTO jobs (id, owner, book_id, action, status, config_json) VALUES (%s,%s,%s,'translate_all','queued',%s)",
+            (job_id, owner, book_id, json.dumps(public_config(cfg), ensure_ascii=False)))
+        # 修复 04-H2：建 job 后先把本轮页落成 pending 行，App 崩溃恢复判定才有依据
+        await run_in_threadpool(_mark_pending_pages, book_id, owner, indices, order_dir)
+    finally:
+        await _job_dedup_release(_lk_conn, _lk_key)
     await _whole_book_queue.put(
         (job_id, lambda: _run_translate_all_from_zip(job_id, owner, book_id, title, order_dir, cfg, indices, names, force)))
     return {"book_job_id": job_id, "status": "queued", "total": len(indices)}
@@ -1506,6 +1609,7 @@ async def _run_translate_all_from_zip(job_id, owner, book_id, title, order_dir, 
         return   # 排队期间被取消，直接退出
     row = await run_in_threadpool(db.query_one, "SELECT zip_path FROM books WHERE id=%s", (book_id,))
     cancelled = False
+    consecutive_failed = 0   # 修复 04-M5：连续 3 页失败熔断，中止整本
     try:
         with zipfile.ZipFile(Path(row["zip_path"])) as z:
             for idx in indices:
@@ -1520,9 +1624,9 @@ async def _run_translate_all_from_zip(job_id, owner, book_id, title, order_dir, 
                 raw = z.read(names[idx])
                 img_sha = sha1_bytes(raw)
                 cfg_hash = pipeline_hash(cfg)
-                cache_key = f"{img_sha}:{cfg_hash}"
+                cache_key = f"{owner}:{img_sha}:{cfg_hash}"   # 修复 04-M2：掺 owner
                 png_path = S.CACHE_DIR / f"{cache_key}.png"
-                redis_key = _cache_key(img_sha, cfg_hash)
+                redis_key = _cache_key(owner, img_sha, cfg_hash)
                 # 修复 04-H2：页起步即写 running 行，进程被杀后恢复判定/进度页才有据可依
                 await run_in_threadpool(_persist_page, book_id, owner, idx, order_dir, title, img_sha, cfg_hash, raw, None, None, "running", 0, None, 0, None)
 
@@ -1534,17 +1638,29 @@ async def _run_translate_all_from_zip(job_id, owner, book_id, title, order_dir, 
                         cfg_page = dict(cfg)
                         cfg_page["context_text"] = ctx_text
                         ctx_source = "db"
-                try:
-                    await _execute_translate(raw, cfg_page, owner, book_id, idx, order_dir, title,
-                                             img_sha, cfg_hash, cache_key, png_path, redis_key,
-                                             ctx_source, False, force,
-                                             priority=_ENGINE_PRIORITY_WHOLE_BOOK)
-                except Exception as e:      # noqa: BLE001
-                    await run_in_threadpool(
-                        _persist_page, book_id, owner, idx, order_dir, title, img_sha, cfg_hash,
-                        raw, None, None, "failed", 1, str(e)[:2000], 0, None)
-                    if _is_fatal_translator_error(e):
-                        raise
+                # 修复 04-M5：连接类错误重试同页至多 2 次（5s/15s）；连续 3 页失败熔断中止整本
+                page_ok = False
+                for _retry in range(3):
+                    try:
+                        await _execute_translate(raw, cfg_page, owner, book_id, idx, order_dir, title,
+                                                 img_sha, cfg_hash, cache_key, png_path, redis_key,
+                                                 ctx_source, False, force,
+                                                 priority=_ENGINE_PRIORITY_WHOLE_BOOK)
+                        page_ok = True
+                        break
+                    except Exception as e:      # noqa: BLE001
+                        if _retry < 2 and _is_connection_error(e):
+                            await asyncio.sleep(5 if _retry == 0 else 15)
+                            continue
+                        await run_in_threadpool(
+                            _persist_page, book_id, owner, idx, order_dir, title, img_sha, cfg_hash,
+                            raw, None, None, "failed", 1, str(e)[:2000], 0, None)
+                        consecutive_failed += 1
+                        if consecutive_failed >= 3 or _is_fatal_translator_error(e):
+                            raise
+                        break
+                if page_ok:
+                    consecutive_failed = 0
         if not cancelled:
             await run_in_threadpool(db.execute,
                                     "UPDATE jobs SET status='done', finished_at=NOW() "
@@ -1572,37 +1688,42 @@ async def translate_book_page(book_id: str, page_index: int, force: bool = Form(
         "INSERT INTO books (id, title, order_dir, owner) VALUES (%s,%s,%s,%s) "
         "ON DUPLICATE KEY UPDATE order_dir=order_dir",
         (book_id, "未命名", None, owner))
-    existing = await run_in_threadpool(
-        db.query_one,
-        "SELECT id FROM jobs WHERE book_id=%s AND target_page_index=%s AND owner=%s "
-        "AND action='translate' AND status IN ('queued','running') LIMIT 1",
-        (book_id, page_index, owner))
-    if existing:
-        return {"job_id": existing["id"], "status": "queued", "duplicate": True,
-                "job_url": f"/v1/jobs/{existing['id']}"}
-    raw = await run_in_threadpool(_read_book_page_bytes, book_id, page_index, owner)
-    if raw is None:
-        raise HTTPException(404, detail="服务端没有该页图片（未同步或 zip 缺失）")
+    # 修复 04-L2：查重+INSERT job 用 GET_LOCK 串行化，防并发双 job；5s 拿不到 → 503
+    _lk_conn, _lk_key = await _job_dedup_guard(book_id, "translate")
+    try:
+        existing = await run_in_threadpool(
+            db.query_one,
+            "SELECT id FROM jobs WHERE book_id=%s AND target_page_index=%s AND owner=%s "
+            "AND action='translate' AND status IN ('queued','running') LIMIT 1",
+            (book_id, page_index, owner))
+        if existing:
+            return {"job_id": existing["id"], "status": "queued", "duplicate": True,
+                    "job_url": f"/v1/jobs/{existing['id']}"}
+        raw = await run_in_threadpool(_read_book_page_bytes, book_id, page_index, owner)
+        if raw is None:
+            raise HTTPException(404, detail="服务端没有该页图片（未同步或 zip 缺失）")
 
-    ctx_source = "none"
-    if S.CONTEXT_PAGES > 0:
-        ctx_text = await run_in_threadpool(book_context_from_db, book_id, page_index, S.CONTEXT_PAGES)
-        if ctx_text:
-            cfg["context_text"] = ctx_text
-            ctx_source = "db"
+        ctx_source = "none"
+        if S.CONTEXT_PAGES > 0:
+            ctx_text = await run_in_threadpool(book_context_from_db, book_id, page_index, S.CONTEXT_PAGES)
+            if ctx_text:
+                cfg["context_text"] = ctx_text
+                ctx_source = "db"
 
-    img_sha = sha1_bytes(raw)
-    cfg_hash = pipeline_hash(cfg)
-    cache_key = f"{img_sha}:{cfg_hash}"
-    png_path = S.CACHE_DIR / f"{cache_key}.png"
-    redis_key = _cache_key(img_sha, cfg_hash)
+        img_sha = sha1_bytes(raw)
+        cfg_hash = pipeline_hash(cfg)
+        cache_key = f"{owner}:{img_sha}:{cfg_hash}"   # 修复 04-M2：掺 owner
+        png_path = S.CACHE_DIR / f"{cache_key}.png"
+        redis_key = _cache_key(owner, img_sha, cfg_hash)
 
-    job_id = str(uuid.uuid4())
-    await run_in_threadpool(
-        db.execute,
-        "INSERT INTO jobs (id, owner, book_id, target_page_index, action, status, config_json) "
-        "VALUES (%s,%s,%s,%s,'translate','queued',%s)",
-        (job_id, owner, book_id, page_index, json.dumps(public_config(cfg), ensure_ascii=False)))
+        job_id = str(uuid.uuid4())
+        await run_in_threadpool(
+            db.execute,
+            "INSERT INTO jobs (id, owner, book_id, target_page_index, action, status, config_json) "
+            "VALUES (%s,%s,%s,%s,'translate','queued',%s)",
+            (job_id, owner, book_id, page_index, json.dumps(public_config(cfg), ensure_ascii=False)))
+    finally:
+        await _job_dedup_release(_lk_conn, _lk_key)
     _spawn_background(_run_translate_job(job_id, owner, raw, cfg, book_id, page_index, None, None,
                                          img_sha, cfg_hash, cache_key, png_path, redis_key,
                                          ctx_source, False, force))
@@ -1651,7 +1772,7 @@ def _rmtree_safe(path: Path) -> None:
 
 @app.get("/v1/jobs/{job_id}", dependencies=[Depends(auth)])
 async def job_status(job_id: str, owner: str = Depends(get_owner)):
-    """任务进度：POST /v1/pages/translate?async=1 后轮询这个。"""
+    """任务进度：POST /v1/pages/translate（表单 async_mode=true）发任务后轮询这个。"""
     row = await run_in_threadpool(
         db.query_one,
         "SELECT id, status, page_id, error, attempts FROM jobs WHERE id=%s AND owner=%s",
@@ -1809,6 +1930,11 @@ async def cloud_upload(req: Request, owner: str = Depends(get_owner),
             await run_in_threadpool(_validate_cloud_zip, temp_path)
         except ValueError as exc:
             raise HTTPException(400, detail=str(exc))
+        # 修复 01-中4：落盘前重读 owner：上传期间同 id 被他人注册则拒绝覆盖（409），删临时文件
+        owner_row = await run_in_threadpool(db.query_one, "SELECT owner FROM books WHERE id=%s", (book_id,))
+        if owner_row and str(owner_row["owner"]) != str(owner):
+            temp_path.unlink(missing_ok=True)
+            raise HTTPException(409, detail="book id already belongs to another user")
         temp_path.replace(zip_path)
         title_ts = _client_timestamp(title_changed_at)
         mode_ts = _client_timestamp(mode_changed_at)
@@ -2004,13 +2130,19 @@ async def app_release_download(release_id: int):
         raise HTTPException(404, detail="release not found")
     root = S.RELEASES_DIR.resolve()
     p = (S.RELEASES_DIR / row["file_path"]).resolve()
-    if not str(p).startswith(str(root)) or not p.is_file():
+    # 修复 01-低7：startswith 可被同前缀目录绕过，改 os.path.commonpath 严格判子路径
+    try:
+        inside = os.path.commonpath([str(p), str(root)]) == str(root)
+    except ValueError:      # 跨盘符/非法路径一律按逃逸处理
+        inside = False
+    if not inside or not p.is_file():
         raise HTTPException(404, detail="release file missing")
     return FileResponse(p, filename=p.name)
 
 
 @app.post("/v1/app/releases", dependencies=[Depends(auth)])
 async def app_release_upload(
+    request: Request,
     version_code: int = Form(...),
     version_name: str = Form(...),
     file: UploadFile = File(...),
@@ -2023,6 +2155,7 @@ async def app_release_upload(
 ):
     """上传新版本 APK 并发布（幂等：同 (channel,platform,abi,version_code) 覆盖）。
     文件落到挂载卷 /data/releases，接口实时查库，因此发布无需重启容器。"""
+    _check_content_length(request, MAX_RELEASE_UPLOAD_BYTES, "APK 发布")
     if version_code <= 0:
         raise HTTPException(400, detail="version_code 必须 > 0")
     data = await file.read()
@@ -2066,13 +2199,26 @@ async def reading_progress_put(book_hash: str, body: dict, owner: str = Depends(
     last_read_at = body.get("last_read_at")
     if not isinstance(page, int) or not isinstance(last_read_at, int):
         raise HTTPException(400, detail="page/last_read_at 必须是整数")
-    await run_in_threadpool(
-        db.execute,
-        "INSERT INTO reading_progress (owner, hash, page, last_read_at) VALUES (%s,%s,%s,%s) "
-        "ON DUPLICATE KEY UPDATE "
-        "page=IF(VALUES(last_read_at) > last_read_at, VALUES(page), page), "
-        "last_read_at=IF(VALUES(last_read_at) > last_read_at, VALUES(last_read_at), last_read_at)",
-        (owner, book_hash, page, last_read_at))
+
+    def _put_progress() -> None:
+        db.execute(
+            "INSERT INTO reading_progress (owner, hash, page, last_read_at) VALUES (%s,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE "
+            "page=IF(VALUES(last_read_at) > last_read_at, VALUES(page), page), "
+            "last_read_at=IF(VALUES(last_read_at) > last_read_at, VALUES(last_read_at), last_read_at)",
+            (owner, book_hash, page, last_read_at))
+
+    try:
+        await run_in_threadpool(_put_progress)
+    except Exception:      # noqa: BLE001
+        # 修复 01-低1：书未注册（books 无 owner+hash 行）触发 FK 1452 →
+        # 注册最小 books 行（id 与 hash 都填该 hash，title 空串）后重试一次，进度不再静默丢
+        await run_in_threadpool(
+            db.execute,
+            "INSERT INTO books (id, owner, title, hash) VALUES (%s,%s,'',%s) "
+            "ON DUPLICATE KEY UPDATE id=id",
+            (book_hash, owner, book_hash))
+        await run_in_threadpool(_put_progress)
     return {"ok": True, "hash": book_hash}
 
 

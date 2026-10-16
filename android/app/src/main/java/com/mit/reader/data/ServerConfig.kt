@@ -25,9 +25,20 @@ object ServerConfig {
         prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     }
 
+    /**
+     * 配置纪元（修复 05-中9 最小版）：下方任意配置写入口（各字段 setter）被调用即自增。
+     * 长循环（全书翻译 / 轻量同步）每轮开始记下它，发现变化立即中止本轮，
+     * 避免进行中请求继续打到旧地址/旧账号，产生孤儿云端书与任务。
+     * 只做同进程内的变更检测（进程重启归零即可）；写入均在主线程，@Volatile 保证对后台协程可见。
+     */
+    @Volatile
+    var configEpoch: Long = 0
+        private set
+
     var baseUrl: String
         get() = prefs?.getString(KEY_URL, null)?.takeIf { it.isNotBlank() } ?: DEFAULT_URL
         set(value) {
+            configEpoch++   // 05-中9：任意配置写入 = 纪元自增
             prefs?.edit()?.putString(KEY_URL, value.trim().trimEnd('/'))?.apply()
         }
 
@@ -35,6 +46,7 @@ object ServerConfig {
     var apiKey: String
         get() = prefs?.getString(KEY_KEY, "")?.trim().orEmpty()
         set(value) {
+            configEpoch++   // 05-中9：任意配置写入 = 纪元自增
             prefs?.edit()?.putString(KEY_KEY, value.trim())?.apply()
         }
 
@@ -42,6 +54,7 @@ object ServerConfig {
     var translatorModel: String
         get() = prefs?.getString(KEY_TRANSLATOR_MODEL, "")?.trim().orEmpty()
         set(value) {
+            configEpoch++   // 05-中9：任意配置写入 = 纪元自增
             prefs?.edit()?.putString(KEY_TRANSLATOR_MODEL, value.trim())?.apply()
         }
 
@@ -49,6 +62,7 @@ object ServerConfig {
     var translatorBaseUrl: String
         get() = prefs?.getString(KEY_TRANSLATOR_BASE_URL, "")?.trim().orEmpty()
         set(value) {
+            configEpoch++   // 05-中9：任意配置写入 = 纪元自增
             prefs?.edit()?.putString(KEY_TRANSLATOR_BASE_URL, value.trim().trimEnd('/'))?.apply()
         }
 
@@ -56,6 +70,7 @@ object ServerConfig {
     var translatorApiKey: String
         get() = prefs?.getString(KEY_TRANSLATOR_API_KEY, "")?.trim().orEmpty()
         set(value) {
+            configEpoch++   // 05-中9：任意配置写入 = 纪元自增
             prefs?.edit()?.putString(KEY_TRANSLATOR_API_KEY, value.trim())?.apply()
         }
 
@@ -69,6 +84,7 @@ object ServerConfig {
     var libraryFolderUri: String?
         get() = prefs?.getString(KEY_LIB_FOLDER, null)
         set(value) {
+            configEpoch++   // 05-中9：任意配置写入 = 纪元自增
             prefs?.edit()?.putString(KEY_LIB_FOLDER, value)?.apply()
         }
 
@@ -76,6 +92,7 @@ object ServerConfig {
     var libraryFolderName: String?
         get() = prefs?.getString(KEY_LIB_FOLDER_NAME, null)
         set(value) {
+            configEpoch++   // 05-中9：任意配置写入 = 纪元自增
             prefs?.edit()?.putString(KEY_LIB_FOLDER_NAME, value)?.apply()
         }
 
@@ -83,6 +100,7 @@ object ServerConfig {
     var libraryStorageDir: String?
         get() = prefs?.getString(KEY_LIBRARY_STORAGE, null)
         set(value) {
+            configEpoch++   // 05-中9：任意配置写入 = 纪元自增
             prefs?.edit()?.putString(KEY_LIBRARY_STORAGE, value)?.apply()
         }
 
@@ -90,6 +108,7 @@ object ServerConfig {
     var kmoeLastUrl: String?
         get() = prefs?.getString("kmoe_last_url", null)
         set(value) {
+            configEpoch++   // 05-中9：任意配置写入 = 纪元自增
             prefs?.edit()?.putString("kmoe_last_url", value)?.apply()
         }
 }

@@ -965,12 +965,22 @@ class ReaderApp : Application() {
         appScope.launch {
             setSync(cb.id, "下载中…", null)
             try {
+                var downloadWarning: String? = null
                 val book = storageGate.withLock {
-                    library.downloadCloud(cb) { text, frac ->
-                        appScope.launch { setSync(cb.id, text, frac) }
-                    }
+                    library.downloadCloud(
+                        cb,
+                        onProgress = { text, frac ->
+                            appScope.launch { setSync(cb.id, text, frac) }
+                        },
+                        onWarning = { w -> downloadWarning = w },
+                    )
                 }
-                Toast.makeText(this@ReaderApp, "已下载《${book.title}》", Toast.LENGTH_SHORT).show()
+                // 修复（05-中2）：页数软校验告警并入结果消息，提示可能缺页（不阻断下载本身）
+                Toast.makeText(
+                    this@ReaderApp,
+                    if (downloadWarning != null) "已下载《${book.title}》｜$downloadWarning" else "已下载《${book.title}》",
+                    if (downloadWarning != null) Toast.LENGTH_LONG else Toast.LENGTH_SHORT,
+                ).show()
                 bumpLibrary()
             } catch (e: CancellationException) {
                 throw e
@@ -2213,8 +2223,17 @@ class ReaderApp : Application() {
 
     /** 轻量同步：批量同步 + 收藏夹对齐。 */
     private suspend fun syncLight() {
+        // 修复（05-中9）：一轮开始记录配置纪元，各步之间发现配置已变立即中止本轮，
+        // 不让同一轮请求一半打旧地址一半打新地址。调用方 runCatching 吞掉即视为本轮放弃，下轮重来。
+        val epochAtRound = ServerConfig.configEpoch
         runCatching { syncOnce() }
+        if (ServerConfig.configEpoch != epochAtRound) {
+            throw CancellationException("服务器配置已变更，已中止本轮同步/翻译")
+        }
         runCatching { syncFoldersNow() }
+        if (ServerConfig.configEpoch != epochAtRound) {
+            throw CancellationException("服务器配置已变更，已中止本轮同步/翻译")
+        }
         runCatching { library.drainFolderSyncs() }
     }
 
@@ -2502,6 +2521,9 @@ class ReaderApp : Application() {
         // 外层重试：网络错误（离线/服务端不可用）不退出、不把书移出队列，等几秒重试
         while (true) {
             if (stopRequested) throw CancellationException("用户停止")
+            // 修复（05-中9）：每轮开始记录配置纪元；轮内（含轮询每个节拍）发现配置已变
+            //（换地址/Key 等任意 ServerConfig 写入）立即中止本轮，避免旧地址半程请求产生孤儿云端书/任务
+            val epochAtRound = ServerConfig.configEpoch
             try {
                 val existing = api.bookPages(serverId).associateBy { it.pageIndex }
                 lastDone = existing.values.count { it.status == "done" }
@@ -2526,6 +2548,14 @@ class ReaderApp : Application() {
                 // 轮询服务端进度，把翻好的页下载到本地缓存
                 while (true) {
                     if (stopRequested) throw CancellationException("用户停止")
+                    // 修复（05-中9）：配置在翻译期间被改 → 立即中止，不再向旧地址轮询/下载。
+                    // 置位 stopRequested 视同「用户停止」收尾：本书退出队列、队列继续跑下一本
+                    //（runOne 对 stopRequested 的 CancellationException 是吞掉而非重抛，不会杀掉队列 worker）
+                    if (ServerConfig.configEpoch != epochAtRound) {
+                        stopRequested = true
+                        Toast.makeText(this@ReaderApp, "服务器配置已变更，已中止本轮同步/翻译", Toast.LENGTH_LONG).show()
+                        throw CancellationException("服务器配置已变更，已中止本轮同步/翻译")
+                    }
                     serverJobId?.let { jobId ->
                         val status = api.job(jobId)
                         when (status.status) {

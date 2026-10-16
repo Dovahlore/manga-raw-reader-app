@@ -25,8 +25,11 @@ BOOKS_DIR = DATA_DIR / "books"
 CLOUD_DIR = DATA_DIR / "cloud"          # 云端同步的书 zip
 RELEASES_DIR = DATA_DIR / "releases"    # App 安装包（挂载卷，放包即发布，无需重启容器）
 
-# 访问令牌：留空=不校验（仅内网自用时可以留空）
+# 访问令牌：留空=不校验（仅内网自用时可以留空；启动时会要求显式允许）
 API_TOKEN = os.getenv("MIT_API_TOKEN", "").strip()
+
+# 管理员令牌（修复 01-中8）：设置后 /v1/admin/* 还需 X-Admin-Token 头匹配，否则 403
+ADMIN_TOKEN = os.getenv("MIT_ADMIN_TOKEN", "")
 
 # 跨页上下文默认取前几页（0=关闭）；App 显式传 context 时以 App 为准
 CONTEXT_PAGES = int(os.getenv("MIT_CONTEXT_PAGES", "3"))

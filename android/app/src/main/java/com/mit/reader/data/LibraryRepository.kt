@@ -1097,7 +1097,11 @@ class LibraryRepository(private val context: Context) {
 
     /** 从云端下载一本书并还原到本地（页面 + 译文缓存 + 归属文件夹），cloudId 保持云端 id。
      *  onProgress(阶段文案, 0..1 进度；null=不确定)。 */
-    suspend fun downloadCloud(cloud: CloudBook, onProgress: ((String, Float?) -> Unit)? = null): Book = withContext(Dispatchers.IO) {
+    suspend fun downloadCloud(
+        cloud: CloudBook,
+        onProgress: ((String, Float?) -> Unit)? = null,
+        onWarning: ((String) -> Unit)? = null,   // 修复（05-中2）：页数软校验告警，不阻断下载
+    ): Book = withContext(Dispatchers.IO) {
         // 去重：同一云端书 / 同一内容，重复点「下载」只复用已有本地书，不再造第二本（否则会「下载两次出现两本书」）
         val cloudHash = cloud.hash ?: ""
         val existing = readIndexData().books.firstOrNull {
@@ -1140,6 +1144,15 @@ class LibraryRepository(private val context: Context) {
             api.cloudDownload(cloud.id, zipFile) { got, total ->
                 onProgress?.invoke("下载中…", if (total > 0) got.toFloat() / total else null)
             }
+            // 修复（05-中2）：硬校验——服务端 size 是上传时累计的 zip 字节数，与实际落盘不符
+            // 说明下载不完整（截断/被替换），抛错让下方 finally 清掉半成品 zip 与目录，不带着坏包入库
+            cloud.size?.takeIf { it > 0L }?.let { expected ->
+                if (zipFile.length() != expected) {
+                    throw IllegalStateException(
+                        "云端书下载不完整（size 不符）：期望 $expected 字节，实际 ${zipFile.length()} 字节",
+                    )
+                }
+            }
             onProgress?.invoke("还原中…", null)
 
             ZipFile(zipFile).use { zip ->
@@ -1175,6 +1188,18 @@ class LibraryRepository(private val context: Context) {
 
         val pages = pagesDir.listFiles { f -> f.isFile }?.sortedBy { it.name } ?: emptyList()
         if (pages.isEmpty()) throw IllegalStateException("云端书 zip 里没有页面")
+        // 修复（05-中2）：软校验——页数偏差超过 max(2, pageCount/10) 只告警不阻断（避免误伤：
+        // 服务端 page_count 与实际解出页可能因历史裁剪/个别坏页有出入），缺页书不再静默入库
+        cloud.pageCount?.takeIf { it > 0 }?.let { expected ->
+            val tolerance = maxOf(2, expected / 10)
+            if (kotlin.math.abs(pages.size - expected) > tolerance) {
+                android.util.Log.w(
+                    "LibraryRepository",
+                    "downloadCloud 页数偏差：cloudId=${cloud.id} expected=$expected actual=${pages.size}",
+                )
+                onWarning?.invoke("云端页数 $expected 与实际 ${pages.size} 相差较大，可能缺页")
+            }
+        }
 
         val srcFile = File(dir, "book.src")
         val hash = if (srcFile.exists()) sha256(srcFile) else (cloud.hash ?: "")
@@ -1496,6 +1521,7 @@ class LibraryRepository(private val context: Context) {
                 if (existing != null) {
                     // 合并：只把缺失/为空的译文页补进已有书
                     var added = 0
+                    val copiedPages = mutableListOf<Int>()
                     val tdir = translatedDir(existing.id).apply { mkdirs() }
                     for (i in 0 until translatedArr.length()) {
                         val o = translatedArr.getJSONObject(i)
@@ -1506,6 +1532,23 @@ class LibraryRepository(private val context: Context) {
                         if (src.exists() && (!dst.exists() || dst.length() == 0L)) {
                             src.copyTo(dst, overwrite = true)
                             added++
+                            // 记下真正补进来的页：sync_meta 只刷新这些页的指纹
+                            o.optInt("pageIndex", name.substringBeforeLast('.').toIntOrNull() ?: -1)
+                                .takeIf { it >= 0 }?.let { copiedPages += it }
+                        }
+                    }
+                    // 修复（05-低3）：合并路径此前不写 sync_meta，指纹陈旧会让 refreshTranslations
+                    // 把刚合并的译文页再拉一遍甚至覆盖。对照首次导入路径（writeSyncMeta）刷新——
+                    // 只更新本次真正补进来的页，不动本地已有页的指纹（它们对应本地自己的译文状态）。
+                    if (copiedPages.isNotEmpty()) {
+                        val sm = m.optJSONObject("syncMeta")
+                        if (sm != null && sm.length() > 0) {
+                            val metaFile = File(tdir, "sync_meta.json")
+                            val meta = readSyncMeta(metaFile)
+                            copiedPages.forEach { pi ->
+                                sm.optString(pi.toString()).takeIf { it.isNotEmpty() }?.let { meta[pi] = it }
+                            }
+                            writeSyncMeta(metaFile, meta)
                         }
                     }
                     applyIncomingProgress(existing.id, m)
