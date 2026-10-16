@@ -127,9 +127,6 @@ async def lifespan(app: FastAPI):
     # 修复 01-低5：空 Token = 全部端点裸奔（含 admin/删库路径）；未显式允许则拒绝启动
     if not S.API_TOKEN and not os.getenv("MIT_ALLOW_EMPTY_TOKEN"):
         raise RuntimeError("MIT_API_TOKEN 为空：拒绝启动；内网自用请显式设置 MIT_ALLOW_EMPTY_TOKEN=1")
-    # 修复 01-中8：管理令牌未设置时 admin 端点无额外保护，启动即警告
-    if not S.ADMIN_TOKEN:
-        print("[app-api] 警告：MIT_ADMIN_TOKEN 未设置，/v1/admin/* 无管理令牌保护", flush=True)
     S.CACHE_DIR.mkdir(parents=True, exist_ok=True)
     S.BOOKS_DIR.mkdir(parents=True, exist_ok=True)
     S.RELEASES_DIR.mkdir(parents=True, exist_ok=True)
@@ -276,11 +273,18 @@ async def auth(x_api_token: Optional[str] = Header(default=None)):
         raise HTTPException(401, detail="invalid X-API-Token")
 
 
-async def require_admin(x_admin_token: Optional[str] = Header(default=None)):
-    # 修复 01-中8：/v1/admin/* 独立管理令牌；MIT_ADMIN_TOKEN 未设置时放行（lifespan 有启动警告）
-    if S.ADMIN_TOKEN:
-        if not x_admin_token or not hmac.compare_digest(x_admin_token.encode(), S.ADMIN_TOKEN.encode()):
-            raise HTTPException(403, detail="invalid X-Admin-Token")
+async def require_admin(x_api_token: Optional[str] = Header(default=None)) -> str:
+    # 管理权限 = users.is_admin：X-API-Token 即身份（与 auth 同一把 Key），哈希查库即时生效（不进缓存）。
+    # 取代旧版 MIT_ADMIN_TOKEN 环境变量方案（多账号部署下更直观：users 表里是管理员才能用管理接口）。
+    token = (x_api_token or "").strip()
+    if not token:
+        raise HTTPException(401, detail="missing X-API-Token")
+    h = hashlib.sha256(token.encode()).hexdigest()
+    row = await run_in_threadpool(
+        db.query_one, "SELECT id FROM users WHERE api_key_hash=%s AND is_admin=1", (h,))
+    if not row:
+        raise HTTPException(403, detail="该账号不是管理员")
+    return str(row["id"])
 
 
 _user_id_cache: Dict[str, str] = {}
@@ -799,15 +803,65 @@ async def usage(owner: str = Depends(get_owner)):
     return {"user_id": owner, "usage": row or {}}
 
 
+_PROCESS_STARTED_AT = time.time()
+
+
+def _sys_runtime() -> dict:
+    """管理台系统信息（尽力而为：读不到的字段为 None，不影响看板）。"""
+    import platform
+    info = {
+        "api_uptime_s": round(time.time() - _PROCESS_STARTED_AT, 1),
+        "api_started_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(_PROCESS_STARTED_AT)),
+        "python": platform.python_version(),
+    }
+    try:
+        with open("/proc/loadavg") as f:
+            info["loadavg"] = f.read().strip()
+    except OSError:
+        info["loadavg"] = None
+    # 内存：优先 cgroup v2（容器真实用量/限额），退回 /proc/meminfo（宿主视角）
+    info["mem_used_bytes"] = info["mem_total_bytes"] = None
+    try:
+        with open("/sys/fs/cgroup/memory.current") as f:
+            info["mem_used_bytes"] = int(f.read().strip())
+        with open("/sys/fs/cgroup/memory.max") as f:
+            lim = f.read().strip()
+        if lim.isdigit():
+            info["mem_total_bytes"] = int(lim)
+    except (OSError, ValueError):
+        pass
+    if info["mem_total_bytes"] is None:
+        try:
+            vals = {}
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    k, _, v = line.partition(":")
+                    vals[k] = int(v.strip().split()[0]) * 1024
+            if vals.get("MemTotal"):
+                info["mem_total_bytes"] = vals["MemTotal"]
+                info["mem_used_bytes"] = vals["MemTotal"] - vals.get("MemAvailable", 0)
+        except (OSError, ValueError, KeyError):
+            pass
+    try:
+        du = shutil.disk_usage(str(S.DATA_DIR))
+        info["disk_used_bytes"], info["disk_total_bytes"] = du.used, du.total
+    except OSError:
+        info["disk_used_bytes"] = info["disk_total_bytes"] = None
+    return info
+
+
 @app.get("/v1/admin/overview", dependencies=[Depends(auth), Depends(require_admin)])
 async def admin_overview():
     """管理平台两模块：后端执行记录 + 用户记录（管理员专用）。"""
     # ---- 模块一：后端执行记录（引擎健康 + 最近任务 + 最近翻译页）----
     engine_ok, queue_size = False, None
+    engine_latency_ms = None
+    t0 = time.time()
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.post(f"{S.ENGINE_URL}/queue-size")
             engine_ok = r.status_code == 200
+            engine_latency_ms = round((time.time() - t0) * 1000)
             if engine_ok:
                 queue_size = r.json()
     except Exception:      # noqa: BLE001
@@ -828,35 +882,284 @@ async def admin_overview():
         "SELECT b.title, p.page_index, p.status, p.tokens, p.elapsed_ms, p.updated_at "
         "FROM pages p LEFT JOIN books b ON b.id=p.book_id "
         "ORDER BY p.updated_at DESC LIMIT 200")
+    daily_done = await run_in_threadpool(
+        db.query,
+        "SELECT DATE(updated_at) AS d, COUNT(*) AS n FROM pages "
+        "WHERE status='done' AND updated_at >= DATE_SUB(NOW(), INTERVAL 13 DAY) "
+        "GROUP BY d ORDER BY d")   # GROUP BY 别名=表达式本身，规避 only_full_group_by
     backend = {
-        "engine": {"ok": engine_ok, "queue_size": queue_size, "db_ok": db_ok, "redis_ok": redis_ok},
+        "engine": {"ok": engine_ok, "queue_size": queue_size, "db_ok": db_ok, "redis_ok": redis_ok,
+                   "latency_ms": engine_latency_ms},
         "jobs": jobs,
         "pages": pages,
+        "daily_done": [{"date": r["d"], "count": r["n"]} for r in (daily_done or [])],
+        "runtime": await run_in_threadpool(_sys_runtime),
     }
 
     # ---- 模块二：用户记录（每个用户 + 每本书 + 全局统计）----
     users = await run_in_threadpool(
         db.query,
-        "SELECT id, name, token_used, page_count, created_at, last_active_at "
-        "FROM users ORDER BY token_used DESC")
-    books = await run_in_threadpool(
-        db.query,
-        "SELECT b.owner, b.title, COALESCE(b.page_count, 0) AS pages, b.zip_path IS NOT NULL AS synced, "
-        "COALESCE(SUM(p.status='done'),0) AS done_pages, "
-        "COALESCE(SUM(p.status='failed'),0) AS failed_pages, COALESCE(SUM(p.tokens),0) AS tokens "
-        "FROM books b LEFT JOIN pages p ON p.book_id=b.id "
-        "GROUP BY b.id, b.owner, b.title, b.page_count, b.zip_path ORDER BY tokens DESC")
+        "SELECT u.id, u.name, u.is_admin, u.token_used, u.page_count, u.created_at, u.last_active_at, "
+        "(SELECT COUNT(*) FROM books b WHERE b.owner=u.id) AS book_count, "
+        "(SELECT COUNT(*) FROM pages p JOIN books b ON p.book_id=b.id "
+        " WHERE b.owner=u.id AND p.status='done') AS done_pages, "
+        "(SELECT COUNT(*) FROM pages p JOIN books b ON p.book_id=b.id "
+        " WHERE b.owner=u.id AND p.status='failed') AS failed_pages, "
+        "(SELECT COALESCE(SUM(b.size),0) FROM books b WHERE b.owner=u.id "
+        " AND b.zip_path IS NOT NULL) AS cloud_bytes "
+        "FROM users u ORDER BY u.last_active_at DESC")
+
+    def _dir_bytes(path) -> int:
+        total = 0
+        if path.exists():
+            for p in path.rglob("*"):
+                try:
+                    if p.is_file():
+                        total += p.stat().st_size
+                except OSError:
+                    pass
+        return total
+
+    cache_bytes = await run_in_threadpool(_dir_bytes, S.CACHE_DIR)
     stats = await run_in_threadpool(
         db.query_one,
         "SELECT (SELECT COUNT(*) FROM users) AS users, "
+        "(SELECT COUNT(*) FROM users WHERE is_admin=1) AS admins, "
         "(SELECT COUNT(*) FROM books) AS books, "
         "(SELECT COUNT(*) FROM pages) AS pages, "
         "(SELECT COALESCE(SUM(status='done'),0) FROM pages) AS done_pages, "
         "(SELECT COALESCE(SUM(status='failed'),0) FROM pages) AS failed_pages, "
-        "(SELECT COALESCE(SUM(token_used),0) FROM users) AS tokens")
-    users_mod = {"users": users, "books": books, "stats": stats or {}}
+        "(SELECT COALESCE(SUM(token_used),0) FROM users) AS tokens, "
+        "(SELECT COALESCE(SUM(size),0) FROM books WHERE zip_path IS NOT NULL) AS cloud_bytes, "
+        "(SELECT COALESCE(SUM(size),0) FROM app_releases) AS releases_bytes, "
+        "(SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')) AS active_jobs")
+    if stats:
+        stats["cache_bytes"] = cache_bytes
+    users_mod = {"users": users, "stats": stats or {}}
 
     return {"backend": backend, "users": users_mod}
+
+
+# ================================================================ 管理接口（users.is_admin 鉴权）
+# 全部挂 require_admin：X-API-Token 必须对应 users.is_admin=1 的账号。
+# 管理台前端（/dashboard）调这些接口 + 既有业务接口。
+
+@app.get("/v1/admin/users")
+async def admin_users(admin: str = Depends(require_admin)):
+    """用户列表（含每人的书数 / 翻译页数 / 云端存储）。"""
+    rows = await run_in_threadpool(
+        db.query,
+        "SELECT u.id, u.name, u.is_admin, u.token_used, u.page_count, u.created_at, u.last_active_at, "
+        "(SELECT COUNT(*) FROM books b WHERE b.owner=u.id) AS book_count, "
+        "(SELECT COUNT(*) FROM pages p JOIN books b ON p.book_id=b.id "
+        " WHERE b.owner=u.id AND p.status='done') AS done_pages, "
+        "(SELECT COUNT(*) FROM pages p JOIN books b ON p.book_id=b.id "
+        " WHERE b.owner=u.id AND p.status='failed') AS failed_pages, "
+        "(SELECT COALESCE(SUM(b.size),0) FROM books b WHERE b.owner=u.id "
+        " AND b.zip_path IS NOT NULL) AS cloud_bytes "
+        "FROM users u ORDER BY u.last_active_at DESC")
+    return {"users": rows}
+
+
+@app.patch("/v1/admin/users/{user_id}")
+async def admin_user_patch(user_id: int, body: Optional[dict] = None,
+                           admin: str = Depends(require_admin)):
+    """改昵称 / 设撤管理员。防呆：不能动自己，不能撤掉最后一个管理员。"""
+    body = body or {}
+    row = await run_in_threadpool(db.query_one, "SELECT id, is_admin FROM users WHERE id=%s", (user_id,))
+    if not row:
+        raise HTTPException(404, detail="user not found")
+    sets, args = [], []
+    if "name" in body:
+        sets.append("name=%s")
+        args.append(str(body.get("name") or "").strip()[:128] or None)
+    if "is_admin" in body:
+        want = 1 if body.get("is_admin") else 0
+        if str(user_id) == admin and not want:
+            raise HTTPException(400, detail="不能撤销自己的管理员权限")
+        if row["is_admin"] and not want:
+            others = await run_in_threadpool(
+                db.query_one, "SELECT COUNT(*) AS n FROM users WHERE is_admin=1 AND id<>%s", (user_id,))
+            if others and int(others["n"]) == 0:
+                raise HTTPException(400, detail="至少保留一个管理员")
+        sets.append("is_admin=%s")
+        args.append(want)
+    if not sets:
+        raise HTTPException(400, detail="没有可更新的字段（支持 name / is_admin）")
+    args.append(user_id)
+    await run_in_threadpool(db.execute, f"UPDATE users SET {', '.join(sets)} WHERE id=%s", tuple(args))
+    return {"ok": True, "user_id": user_id}
+
+
+@app.delete("/v1/admin/users/{user_id}")
+async def admin_user_delete(user_id: int, admin: str = Depends(require_admin)):
+    """删除用户及其全部数据（书 zip / 页文件 / DB 行 / 收藏夹 / 阅读进度 / 结果缓存）。
+
+    注意：API Key 来自部署环境（app.env），删用户不吊销 Key——该 Key 下次请求会重建空账号；
+    要彻底禁用请从 app.env 移除对应 Key。
+    """
+    if str(user_id) == admin:
+        raise HTTPException(400, detail="不能删除自己")
+    row = await run_in_threadpool(db.query_one, "SELECT id, is_admin FROM users WHERE id=%s", (user_id,))
+    if not row:
+        raise HTTPException(404, detail="user not found")
+    if row["is_admin"]:
+        others = await run_in_threadpool(
+            db.query_one, "SELECT COUNT(*) AS n FROM users WHERE is_admin=1 AND id<>%s", (user_id,))
+        if others and int(others["n"]) == 0:
+            raise HTTPException(400, detail="至少保留一个管理员")
+    books = await run_in_threadpool(db.query, "SELECT id, zip_path FROM books WHERE owner=%s", (user_id,))
+    for b in books:
+        if b["zip_path"]:
+            await run_in_threadpool(_rmtree_safe, Path(b["zip_path"]).parent)
+        await run_in_threadpool(_rmtree_safe, _book_dir_safe(b["id"]))
+        _mark_book_deleted(b["id"])
+    await run_in_threadpool(db.execute, "DELETE FROM books WHERE owner=%s", (user_id,))
+    await run_in_threadpool(db.execute, "DELETE FROM jobs WHERE owner=%s", (user_id,))
+    await run_in_threadpool(db.execute, "DELETE FROM cloud_folders WHERE owner=%s", (user_id,))
+    await run_in_threadpool(db.execute, "DELETE FROM reading_progress WHERE owner=%s", (user_id,))
+
+    def _purge_cache() -> int:
+        n = 0
+        if S.CACHE_DIR.exists():
+            for f in S.CACHE_DIR.glob(f"{user_id}:*"):
+                try:
+                    f.unlink()
+                    n += 1
+                except OSError:
+                    pass
+        return n
+
+    n = await run_in_threadpool(_purge_cache)
+    await run_in_threadpool(db.execute, "DELETE FROM users WHERE id=%s", (user_id,))
+    return {"ok": True, "user_id": user_id, "deleted_books": len(books), "deleted_cache_files": n}
+
+
+@app.get("/v1/admin/books")
+async def admin_books(owner: Optional[str] = Query(None), q: Optional[str] = Query(None),
+                      admin: str = Depends(require_admin)):
+    """全部书（跨用户）：翻译进度 / 失败页数 / 活跃任务；q 按书名过滤。"""
+    sql = ("SELECT b.id, b.owner, b.title, b.format, b.mode, b.page_count, b.size, "
+           "b.zip_path IS NOT NULL AS synced, b.created_at, b.synced_at, "
+           "COALESCE(SUM(p.status='done'),0) AS done_pages, "
+           "COALESCE(SUM(p.status='failed'),0) AS failed_pages, "
+           "(SELECT COUNT(*) FROM jobs j WHERE j.book_id=b.id AND j.status IN ('queued','running')) AS active_jobs "
+           "FROM books b LEFT JOIN pages p ON p.book_id=b.id ")
+    args = []
+    if owner:
+        sql += "WHERE b.owner=%s "
+        args.append(str(owner))
+    sql += ("GROUP BY b.id, b.owner, b.title, b.format, b.mode, b.page_count, b.size, b.zip_path, "
+            "b.created_at, b.synced_at ORDER BY b.created_at DESC LIMIT 500")
+    rows = await run_in_threadpool(db.query, sql, tuple(args))
+    users = await run_in_threadpool(db.query, "SELECT id, name FROM users")
+    names = {str(u["id"]): u.get("name") for u in users}
+    for r in rows:
+        r["owner_name"] = names.get(str(r["owner"]))
+    if q:
+        ql = q.lower()
+        rows = [r for r in rows if ql in (r.get("title") or "").lower()]
+    return {"books": rows}
+
+
+@app.get("/v1/admin/books/{book_id}/failed-pages")
+async def admin_failed_pages(book_id: str, admin: str = Depends(require_admin)):
+    """某本书的失败页明细（页码 / 次数 / 错误文本）。"""
+    rows = await run_in_threadpool(
+        db.query,
+        "SELECT id, page_index, attempts, error, elapsed_ms, updated_at FROM pages "
+        "WHERE book_id=%s AND status='failed' ORDER BY page_index", (book_id,))
+    return {"book_id": book_id, "failed": rows}
+
+
+@app.delete("/v1/admin/books/{book_id}")
+async def admin_book_delete(book_id: str, admin: str = Depends(require_admin)):
+    """管理员删书（不限归属）：取消任务 + 级联删 DB + 云 zip + 磁盘页文件。"""
+    row = await run_in_threadpool(db.query_one, "SELECT id, zip_path FROM books WHERE id=%s", (book_id,))
+    if not row:
+        raise HTTPException(404, detail="book not found")
+    pages = await run_in_threadpool(db.query_one, "SELECT COUNT(*) AS n FROM pages WHERE book_id=%s", (book_id,))
+    await run_in_threadpool(
+        db.execute,
+        "UPDATE jobs SET status='cancelled', finished_at=NOW() "
+        "WHERE book_id=%s AND status IN ('queued','running')", (book_id,))
+    await run_in_threadpool(db.execute, "DELETE FROM books WHERE id=%s", (book_id,))
+    if row["zip_path"]:
+        await run_in_threadpool(_rmtree_safe, Path(row["zip_path"]).parent)
+    await run_in_threadpool(_rmtree_safe, _book_dir_safe(book_id))
+    _mark_book_deleted(book_id)
+    return {"ok": True, "book_id": book_id, "deleted_pages": pages["n"] if pages else 0}
+
+
+@app.get("/v1/admin/jobs")
+async def admin_jobs(admin: str = Depends(require_admin)):
+    """任务三态：排队/进行中、失败（含错误文本）、最近完成。"""
+    active = await run_in_threadpool(
+        db.query,
+        "SELECT j.id, j.action, j.status, j.book_id, b.title, j.owner, j.target_page_index, "
+        "j.attempts, j.queued_at, j.started_at FROM jobs j LEFT JOIN books b ON b.id=j.book_id "
+        "WHERE j.status IN ('queued','running') ORDER BY j.queued_at")
+    failed = await run_in_threadpool(
+        db.query,
+        "SELECT j.id, j.action, j.status, j.book_id, b.title, j.owner, j.target_page_index, "
+        "j.attempts, j.error, j.queued_at, j.finished_at FROM jobs j LEFT JOIN books b ON b.id=j.book_id "
+        "WHERE j.status='failed' ORDER BY j.finished_at DESC LIMIT 100")
+    done = await run_in_threadpool(
+        db.query,
+        "SELECT j.id, j.action, j.status, j.book_id, b.title, j.owner, j.target_page_index, "
+        "j.finished_at FROM jobs j LEFT JOIN books b ON b.id=j.book_id "
+        "WHERE j.status='done' ORDER BY j.finished_at DESC LIMIT 50")
+    return {"active": active, "failed": failed, "done": done}
+
+
+@app.post("/v1/admin/jobs/{job_id}/cancel")
+async def admin_job_cancel(job_id: str, admin: str = Depends(require_admin)):
+    """取消任意任务（不限归属）。"""
+    await run_in_threadpool(
+        db.execute,
+        "UPDATE jobs SET status='cancelled', finished_at=NOW() "
+        "WHERE id=%s AND status IN ('queued','running')", (job_id,))
+    return {"ok": True, "job_id": job_id}
+
+
+@app.get("/v1/admin/releases")
+async def admin_releases(admin: str = Depends(require_admin)):
+    """版本列表（含下架的）。"""
+    rows = await run_in_threadpool(
+        db.query,
+        "SELECT id, version_code, version_name, channel, platform, abi, `force`, min_version_code, "
+        "changelog, size, sha256, enabled, created_at FROM app_releases "
+        "ORDER BY channel, version_code DESC")
+    return {"releases": rows}
+
+
+@app.delete("/v1/admin/releases/{release_id}")
+async def admin_release_disable(release_id: int, admin: str = Depends(require_admin)):
+    """下架版本（enabled=0）：更新接口不再下发；历史保留，重新上传同版本号可再启用。"""
+    row = await run_in_threadpool(db.query_one, "SELECT id FROM app_releases WHERE id=%s", (release_id,))
+    if not row:
+        raise HTTPException(404, detail="release not found")
+    await run_in_threadpool(db.execute, "UPDATE app_releases SET enabled=0 WHERE id=%s", (release_id,))
+    return {"ok": True, "release_id": release_id}
+
+
+@app.post("/v1/admin/releases/{release_id}/enable")
+async def admin_release_enable(release_id: int, admin: str = Depends(require_admin)):
+    """重新上架已下架的版本。"""
+    row = await run_in_threadpool(db.query_one, "SELECT id FROM app_releases WHERE id=%s", (release_id,))
+    if not row:
+        raise HTTPException(404, detail="release not found")
+    await run_in_threadpool(db.execute, "UPDATE app_releases SET enabled=1 WHERE id=%s", (release_id,))
+    return {"ok": True, "release_id": release_id}
+
+
+@app.get("/v1/admin/update-preview")
+async def admin_update_preview(version_code: int = Query(0), channel: str = Query("stable"),
+                               platform: str = Query("android"), abi: str = Query("universal"),
+                               admin: str = Depends(require_admin)):
+    """更新模拟器：某个旧版本号的 App 调 /v1/app/update 会收到什么。"""
+    row = await run_in_threadpool(_query_latest_release, platform, channel, abi, version_code)
+    return _update_response(row, version_code)
 
 
 @app.get("/dashboard", include_in_schema=False)
@@ -2140,20 +2443,16 @@ async def cloud_folder_delete(folder_id: int, owner: str = Depends(get_owner)):
 # ---------------------------------------------------------------- App 自动更新
 # 版本检测实时查库（不缓存）；APK 放 /data/releases（挂载卷），上传接口写入即发布，免重启容器。
 
-@app.get("/v1/app/update")
-async def app_update(
-    platform: str = Query("android"),
-    channel: str = Query("stable"),
-    abi: str = Query("universal"),
-    version_code: int = Query(0),
-):
-    row = await run_in_threadpool(
-        db.query_one,
+def _query_latest_release(platform: str, channel: str, abi: str, version_code: int):
+    """App 更新查询与管理端预览共用同一口径。"""
+    return db.query_one(
         "SELECT id, version_code, version_name, changelog, file_path, size, sha256, `force`, min_version_code "
         "FROM app_releases WHERE platform=%s AND channel=%s AND abi IN (%s, 'universal') AND enabled=1 AND version_code > %s "
         "ORDER BY version_code DESC LIMIT 1",
-        (platform, channel, abi, version_code),
-    )
+        (platform, channel, abi, version_code))
+
+
+def _update_response(row, version_code: int) -> dict:
     if not row:
         return {"latest": False, "version_code": version_code}
     forced = bool(row["force"]) or version_code < int(row["min_version_code"] or 0)
@@ -2168,6 +2467,17 @@ async def app_update(
         "min_version_code": row["min_version_code"],
         "download_path": f"/v1/app/releases/{row['id']}/download",
     }
+
+
+@app.get("/v1/app/update")
+async def app_update(
+    platform: str = Query("android"),
+    channel: str = Query("stable"),
+    abi: str = Query("universal"),
+    version_code: int = Query(0),
+):
+    row = await run_in_threadpool(_query_latest_release, platform, channel, abi, version_code)
+    return _update_response(row, version_code)
 
 
 @app.get("/v1/app/releases/{release_id}/download")
@@ -2188,7 +2498,7 @@ async def app_release_download(release_id: int):
     return FileResponse(p, filename=p.name)
 
 
-@app.post("/v1/app/releases", dependencies=[Depends(auth)])
+@app.post("/v1/app/releases", dependencies=[Depends(auth), Depends(require_admin)])
 async def app_release_upload(
     request: Request,
     version_code: int = Form(...),

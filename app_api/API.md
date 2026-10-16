@@ -6,15 +6,15 @@
   想关掉鉴权：`MIT_API_TOKEN` 留空**且**显式设 `MIT_ALLOW_EMPTY_TOKEN=1` 再重启——缺一样服务会拒绝启动。
 - **公开端点（无 X-API-Token，App 更新通道的既成契约）**：`GET /v1/app/update`、
   `GET /v1/app/releases/{id}/download`、`GET /dashboard`（看板 HTML）、`GET /`。
-- **管理端点**：`GET /v1/admin/overview` 在 `X-API-Token` 之外还要求 `X-Admin-Token` 头匹配
-  `MIT_ADMIN_TOKEN`（未配置该变量时放行，启动日志有警告）。
+- **管理端点**：`X-API-Token` 即身份，必须对应 `users.is_admin=1` 的账号（详见 §6.5）；
+  未带 Key 401，Key 有效但非管理员 403。
 - Swagger（可以直接在浏览器里点着试）：<http://127.0.0.1:8020/docs>（右上角 `Authorize` 填 token）
 - 现成 Collection：`docs/postman/mit-app-api.postman_collection.json` → Postman `Import`，
   先在集合变量里把 `token` 填上
 - **Postman 里必须处理的坑**：你开着 Clash，Postman 默认走系统代理，会去访问代理而不是本机。
   在 `Settings → Proxy` 关掉 `Use system proxy configuration`，或者把 `127.0.0.1` 加进 bypass 列表。
 
-通用状态码：`400` 参数问题 / `401` 缺鉴权 / `403` 管理令牌不对 / `404` 不存在 / `409` 书 id 已属他人 /
+通用状态码：`400` 参数问题 / `401` 缺鉴权 / `403` 非管理员（或被禁操作） / `404` 不存在 / `409` 书 id 已属他人 /
 `410` 原图不在本地（重译）/ `413` 请求体超限（单页 50MB、整书 4GB、APK 1GB、云同步 zip 2GB）/
 `422` 表单类型不对 / `502` 引擎侧故障（detail 里会写明原因）/ `503` 同书建任务锁忙（稍后重试）。
 
@@ -204,10 +204,34 @@ curl "http://127.0.0.1:8020/v1/books/demo-book/pages?after_index=99"
 | `GET /v1/books/{book_id}/active-page-jobs` | —— | 该书进行中的单页任务列表 |
 | `POST /v1/jobs/{job_id}/cancel` | —— | 取消任务（只对 queued/running 生效） |
 | `POST /v1/books/{book_id}/cancel` | —— | 按书取消全部活动任务 |
-| `GET /v1/admin/overview` | 头：`X-Admin-Token` | 全局看板数据（管理用；需 `MIT_ADMIN_TOKEN`） |
 
 > 同一本书并发建任务会被 GET_LOCK 串行化：查重命中返回已有 job（`duplicate:true`），锁忙返回 503 稍后重试。
 > 全书逐页失败有熔断：连接类错误单页重试至多 2 次，连续 3 页失败中止整本 job。
+
+---
+
+## 6.5 管理接口（users.is_admin 鉴权，管理平台 /dashboard 用）
+
+> 管理权限不再是独立环境变量：`X-API-Token` 即身份，必须对应 `users.is_admin=1` 的账号（即时查库，改权限立刻生效）。
+> 未带 Key 401；Key 有效但非管理员 403。`users.is_admin` 列已同步进 schema.sql（存量库需手动 ALTER）。
+> **管理平台只做检测与管理，不触发翻译**：失败页在管理台看明细与错误，重译一律在手机 App 内操作
+> （翻译模型凭据只存在 App 侧；任务表 `config_json` 与缓存统一经 `public_config` 剥掉 `api_key`，服务端任何位置不存模型 Key）。
+
+| 请求 | Body/参数 | 说明 |
+|---|---|---|
+| `GET /v1/admin/overview` | —— | 全局看板（引擎/DB/Redis 健康+延迟、API 运行时长、近 14 天每日完成页数、容器内存/磁盘、统计、最近任务/翻译页） |
+| `GET /v1/admin/users` | —— | 用户列表（含每人书数/已翻/失败页/云端存储/是否管理员） |
+| `PATCH /v1/admin/users/{id}` | `{"name":str, "is_admin":0/1}`（均可选） | 改名/设撤管理员；不能动自己，不能撤最后一个管理员 |
+| `DELETE /v1/admin/users/{id}` | —— | 删用户全部数据（书 zip+页文件+DB+任务+收藏夹+进度+缓存）；不吊销 Key（来自 app.env） |
+| `GET /v1/admin/books` | `?owner=&q=` | 跨用户书列表（翻译进度/失败页数/活跃任务；q 按书名过滤） |
+| `GET /v1/admin/books/{book_id}/failed-pages` | —— | 失败页明细（页码/次数/错误文本） |
+| `DELETE /v1/admin/books/{book_id}` | —— | 管理员删书（不限归属，级联删文件与记录） |
+| `GET /v1/admin/jobs` | —— | 任务三态：active / failed（含错误文本）/ 最近 done |
+| `POST /v1/admin/jobs/{job_id}/cancel` | —— | 取消任意任务 |
+| `GET /v1/admin/releases` | —— | 版本列表（含已下架） |
+| `DELETE /v1/admin/releases/{id}` | —— | 下架版本（enabled=0，历史保留） |
+| `POST /v1/admin/releases/{id}/enable` | —— | 重新上架 |
+| `GET /v1/admin/update-preview?version_code=` | —— | 更新模拟器：某版本号 App 调 /v1/app/update 会收到什么 |
 
 ---
 
@@ -227,8 +251,8 @@ curl "http://127.0.0.1:8020/v1/books/demo-book/pages?after_index=99"
 |---|---|---|
 | `GET /v1/app/update?platform=&channel=&abi=&version_code=` | 公开 | 检查更新（返回最新版与 download_path） |
 | `GET /v1/app/releases/{id}/download` | 公开 | 下载 APK（路径严格限制在 releases 目录内） |
-| `POST /v1/app/releases` | X-API-Token | 上传发布 APK（multipart，≤1GB；幂等覆盖同 channel/platform/abi/version_code） |
-| `GET /dashboard` | 公开 | 看板 HTML（数据接口 `/v1/admin/overview` 另需管理令牌） |
+| `POST /v1/app/releases` | X-API-Token + 管理员 | 上传发布 APK（multipart，≤1GB；幂等覆盖同 channel/platform/abi/version_code） |
+| `GET /dashboard` | 公开 | 管理台 HTML（五 Tab：概览/用户/书籍/任务/版本；非管理员 Key 登录只见自己的只读数据） |
 
 ---
 

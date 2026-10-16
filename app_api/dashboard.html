@@ -9,30 +9,68 @@
   * { box-sizing: border-box; }
   body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 0; padding: 0; background: #f5f6f8; color: #1c1c1e; }
   @media (prefers-color-scheme: dark) { body { background: #101014; color: #e8e8ea; } }
-  .header { display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #fff; border-bottom: 1px solid #eee; position: sticky; top: 0; z-index: 10; }
+  .header { display: flex; align-items: center; gap: 12px; padding: 14px 18px; background: #fff; border-bottom: 1px solid #eee; position: sticky; top: 0; z-index: 10; flex-wrap: wrap; }
   @media (prefers-color-scheme: dark) { .header { background: #18181d; border-color: #2a2a30; } }
   .header h1 { font-size: 18px; margin: 0; white-space: nowrap; }
-  .header input { flex: 1; max-width: 340px; padding: 7px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; }
-  .header button { padding: 7px 16px; border: 0; border-radius: 6px; background: #2563eb; color: #fff; font-size: 13px; cursor: pointer; }
-  .header button:hover { background: #1d4ed8; }
-  .tabs { display: flex; gap: 0; background: #fff; border-bottom: 1px solid #eee; padding: 0 18px; position: sticky; top: 55px; z-index: 9; }
+  #token { flex: 1; max-width: 340px; min-width: 180px; padding: 7px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; }
+  .header button, .btn { padding: 7px 14px; border: 0; border-radius: 6px; background: #2563eb; color: #fff; font-size: 13px; cursor: pointer; }
+  .header button:hover, .btn:hover { background: #1d4ed8; }
+  .btn.sm { padding: 3px 10px; font-size: 12px; }
+  .btn.danger { background: #dc2626; } .btn.danger:hover { background: #b91c1c; }
+  .btn.ghost { background: transparent; color: #2563eb; border: 1px solid #2563eb; } .btn.ghost:hover { background: rgba(37,99,235,.08); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .tabs { display: flex; gap: 0; background: #fff; border-bottom: 1px solid #eee; padding: 0 18px; position: sticky; top: 55px; z-index: 9; overflow-x: auto; }
   @media (prefers-color-scheme: dark) { .tabs { background: #18181d; border-color: #2a2a30; } }
-  .tab { padding: 12px 18px; border: 0; background: none; font-size: 14px; color: #666; cursor: pointer; border-bottom: 2px solid transparent; }
+  .tab { padding: 12px 18px; border: 0; background: none; font-size: 14px; color: #666; cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
   @media (prefers-color-scheme: dark) { .tab { color: #aaa; } }
   .tab.active { color: #2563eb; border-bottom-color: #2563eb; font-weight: 600; }
-  .content { padding: 18px; max-width: 1100px; margin: 0 auto; }
-  .cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  .content { padding: 18px; max-width: 1200px; margin: 0 auto; }
+  /* 状态条 */
+  .strip { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; background: #fff; border: 1px solid #eee; border-radius: 10px; padding: 10px 16px; margin-bottom: 14px; font-size: 13px; }
+  @media (prefers-color-scheme: dark) { .strip { background: #1e1e24; border-color: #2a2a30; } }
+  .sitem { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .dot.on { background: #16a34a; box-shadow: 0 0 0 0 rgba(22,163,74,.5); animation: pulse 2s infinite; }
+  .dot.off { background: #dc2626; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(22,163,74,.45);} 70% { box-shadow: 0 0 0 7px rgba(22,163,74,0);} 100% { box-shadow: 0 0 0 0 rgba(22,163,74,0);} }
+  /* 卡片 */
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
   .card { flex: 1 1 150px; background: #fff; border: 1px solid #eee; border-radius: 10px; padding: 14px 16px; }
   @media (prefers-color-scheme: dark) { .card { background: #1e1e24; border-color: #2a2a30; } }
   .card .k { font-size: 12px; color: #888; }
-  .card .v { font-size: 20px; font-weight: 600; margin-top: 4px; }
-  h3 { font-size: 13px; margin: 16px 0 6px; color: #555; }
+  .card .v { font-size: 22px; font-weight: 650; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .card .sub { font-size: 11px; color: #999; margin-top: 2px; }
+  .card.row { display: flex; align-items: center; gap: 12px; }
+  .card.row .txt { min-width: 0; }
+  .card.row .txt .v { margin-top: 2px; }
+  .kpi-wrap { flex: 1 1 160px; }
+  h3 { font-size: 13px; margin: 18px 0 8px; color: #555; }
   @media (prefers-color-scheme: dark) { h3 { color: #aaa; } }
+  /* 两栏 */
+  .cols { display: grid; grid-template-columns: 3fr 2fr; gap: 14px; align-items: start; }
+  @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
+  .panel { background: #fff; border: 1px solid #eee; border-radius: 10px; padding: 14px 16px; margin: 0 0 14px; }
+  @media (prefers-color-scheme: dark) { .panel { background: #1e1e24; border-color: #2a2a30; } }
+  .panel h4 { margin: 0 0 10px; font-size: 13px; color: #555; }
+  @media (prefers-color-scheme: dark) { .panel h4 { color: #aaa; } }
+  .barchart { width: 100%; height: auto; display: block; }
+  /* 存储行 */
+  .srow { margin: 8px 0; }
+  .srow .k { font-size: 12px; color: #888; }
+  .srow .v { float: right; font-size: 12px; color: #666; }
+  .prog { height: 7px; border-radius: 999px; background: rgba(125,125,135,.18); overflow: hidden; margin-top: 4px; clear: both; }
+  .prog i { display: block; height: 100%; border-radius: 999px; background: #2563eb; transition: width .4s; }
+  /* 系统信息格 */
+  .sysgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .sysitem { background: rgba(125,125,135,.06); border-radius: 8px; padding: 8px 12px; }
+  .sysitem .k { font-size: 11px; color: #888; }
+  .sysitem .v { font-size: 14px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; word-break: break-all; }
+  /* 表格 */
   table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #eee; border-radius: 10px; overflow: hidden; }
   @media (prefers-color-scheme: dark) { table { background: #1e1e24; border-color: #2a2a30; } }
-  th, td { text-align: left; padding: 8px 10px; font-size: 13px; border-bottom: 1px solid #eee; }
+  th, td { text-align: left; padding: 8px 10px; font-size: 13px; border-bottom: 1px solid #eee; vertical-align: top; }
   @media (prefers-color-scheme: dark) { th, td { border-bottom: 1px solid #2a2a30; } }
-  th { background: #fafafa; color: #666; font-weight: 500; }
+  th { background: #fafafa; color: #666; font-weight: 500; white-space: nowrap; }
   @media (prefers-color-scheme: dark) { th { background: #26262c; color: #aaa; } }
   tr:last-child td { border-bottom: 0; }
   .mono { font-variant-numeric: tabular-nums; }
@@ -40,99 +78,554 @@
   .pill { display:inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 500; }
   .pill.on { background: #dcfce7; color: #16a34a; } .pill.off { background: #fee2e2; color: #dc2626; }
   .pill.synced { background: #dbeafe; color: #1d4ed8; } .pill.local { background: #f3f4f6; color: #6b7280; }
-  @media (prefers-color-scheme: dark) { .pill.on { background: #123b24; color: #4ade80; } .pill.off { background: #3b1212; color: #f87171; } .pill.synced { background: #1e3a5f; color: #93c5fd; } .pill.local { background: #2a2a30; color: #9ca3af; } }
-  .logbox { background: #101014; color: #d0d0d0; font-family: ui-monospace, Consolas, monospace; font-size: 12px; padding: 12px; border-radius: 8px; max-height: 60vh; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+  .pill.admin { background: #fef3c7; color: #b45309; }
+  @media (prefers-color-scheme: dark) { .pill.on { background: #123b24; color: #4ade80; } .pill.off { background: #3b1212; color: #f87171; } .pill.synced { background: #1e3a5f; color: #93c5fd; } .pill.local { background: #2a2a30; color: #9ca3af; } .pill.admin { background: #3b2f10; color: #fbbf24; } }
   .hint { font-size: 12px; color: #999; }
   .err { color: #dc2626; font-size: 13px; padding: 8px 18px; }
+  .msg { color: #16a34a; font-size: 13px; padding: 8px 18px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; margin: 0 0 10px; flex-wrap: wrap; }
+  .toolbar input[type=text] { padding: 7px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; min-width: 200px; }
+  .panel pre { margin: 8px 0 0; background: #101014; color: #d0d0d0; padding: 10px; border-radius: 8px; font-size: 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+  .formgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; margin-bottom: 10px; }
+  .formgrid label { font-size: 12px; color: #777; display: block; margin-bottom: 3px; }
+  .formgrid input, .formgrid select, .formgrid textarea { width: 100%; padding: 7px 9px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; background: inherit; color: inherit; }
+  .errmsg { color: #dc2626; font-size: 12px; max-width: 480px; word-break: break-all; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  /* 分页 */
+  .pager { display: flex; align-items: center; gap: 8px; margin: 10px 0 0; flex-wrap: wrap; }
 </style>
 </head>
 <body>
 <div class="header">
   <h1>MIT 管理平台</h1>
-  <input id="token" type="password" placeholder="管理员 X-API-Token" autocomplete="off">
-  <button onclick="load()">刷新</button>
-  <span class="hint">Token 只存浏览器本地</span>
+  <input id="token" type="password" placeholder="X-API-Token（管理员 Key）" autocomplete="off">
+  <button onclick="login()">登录</button>
+  <span id="whoami" class="hint"></span>
 </div>
 <div id="err" class="err"></div>
-<div class="tabs" id="tabs" style="display:none">
-  <button class="tab active" id="tabBtn0" onclick="switchTab(0)">① 后端执行</button>
-  <button class="tab" id="tabBtn1" onclick="switchTab(1)">② 用户记录</button>
-</div>
+<div id="msg" class="msg" style="display:none"></div>
+<div class="tabs" id="tabs" style="display:none"></div>
 <div class="content" id="root"></div>
 
 <script>
 const tokenInput = document.getElementById('token');
 tokenInput.value = localStorage.getItem('mit_token') || '';
 tokenInput.oninput = () => localStorage.setItem('mit_token', tokenInput.value);
+tokenInput.onkeydown = (e) => { if (e.key === 'Enter') login(); };
 
+const S = { isAdmin: false, tab: 0, data: {}, jobsTimer: null };
+const ADMIN_TABS = ['概览', '用户', '书籍', '任务', '版本'];
+const USER_TABS = ['我的数据'];
+
+// ---------------- 分页状态（每页条数可调） ----------------
+const PG = {
+  ovJobs:   { p: 1, per: 10 },
+  ovPages:  { p: 1, per: 10 },
+  books:    { p: 1, per: 20 },
+  jobsFailed: { p: 1, per: 15 },
+  jobsDone: { p: 1, per: 15 },
+};
+const PG_CB = {};
+function slice(id, arr) {
+  const g = PG[id];
+  const pages = Math.max(1, Math.ceil(arr.length / g.per));
+  if (g.p > pages) g.p = pages;
+  if (g.p < 1) g.p = 1;
+  return { rows: arr.slice((g.p - 1) * g.per, g.p * g.per), p: g.p, pages, total: arr.length };
+}
+function pagerHtml(id, v) {
+  if (v.pages <= 1) return `<div class="pager"><span class="hint">共 ${v.total} 条</span></div>`;
+  return `<div class="pager"><span class="hint">共 ${v.total} 条 · 第 ${v.p}/${v.pages} 页</span>
+    <button class="btn sm ghost" ${v.p <= 1 ? 'disabled' : ''} onclick="pgGo('${id}',-1)">‹ 上一页</button>
+    <button class="btn sm ghost" ${v.p >= v.pages ? 'disabled' : ''} onclick="pgGo('${id}',1)">下一页 ›</button></div>`;
+}
+function pgGo(id, d) { PG[id].p += d; (PG_CB[id] || function () {})(); }
+
+// ---------------- 通用工具 ----------------
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function fmtTok(n) { n = Number(n)||0; return n >= 1000000 ? (n/1000000).toFixed(2)+'M' : n >= 1000 ? (n/1000).toFixed(1)+'K' : String(n); }
-function card(k, v) { return `<div class="card"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`; }
+function fmtBytes(n) { n = Number(n)||0; const u=['B','KB','MB','GB','TB']; let i=0; while(n>=1024&&i<u.length-1){n/=1024;i++;} return (i?n.toFixed(1):n)+' '+u[i]; }
+function fmtDur(s) {
+  s = Number(s)||0; if (s < 0) s = 0;
+  if (s < 90) return Math.floor(s) + ' 秒';
+  const m = Math.floor(s/60), h = Math.floor(m/60), d = Math.floor(h/24);
+  if (d > 0) return d + ' 天 ' + (h%24) + ' 小时';
+  if (h > 0) return h + ' 小时 ' + (m%60) + ' 分';
+  return m + ' 分';
+}
+function dkey(dt) { return dt.getFullYear() + '-' + String(dt.getMonth()+1).padStart(2,'0') + '-' + String(dt.getDate()).padStart(2,'0'); }
+function card(k, v, sub) { return `<div class="card"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div>${sub?`<div class="sub">${esc(sub)}</div>`:''}</div>`; }
 function cardHtml(k, html) { return `<div class="card"><div class="k">${esc(k)}</div><div class="v">${html}</div></div>`; }
-function pill(on, onTxt, offTxt) { return on ? `<span class="pill on">${onTxt}</span>` : `<span class="pill off">${offTxt}</span>`; }
-function table(head, rows) { return `<table><thead><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`; }
+function table(head, rows) { return rows.length ? `<table><thead><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>` : `<div class="hint">（空）</div>`; }
 function statusBadge(s) { return s==='done'?'<span class="ok">done</span>':s==='failed'?'<span class="bad">failed</span>':`<span class="warn">${esc(s)}</span>`; }
+function flash(text) { const m = document.getElementById('msg'); m.textContent = text; m.style.display = 'block'; clearTimeout(flash._t); flash._t = setTimeout(() => m.style.display = 'none', 4000); }
+function fail(text) { document.getElementById('err').textContent = text; }
 
-async function load() {
-  const token = tokenInput.value.trim();
-  const errEl = document.getElementById('err');
-  errEl.textContent = '';
-  if (!token) { errEl.textContent = '请先填管理员 X-API-Token'; return; }
-  try {
-    const r = await fetch('/v1/admin/overview', { headers: { 'X-API-Token': token } });
-    if (!r.ok) throw new Error('HTTP ' + r.status + (r.status === 401 ? '（Token 不对）' : ''));
-    render(await r.json());
-    document.getElementById('tabs').style.display = 'flex';
-  } catch (e) { errEl.textContent = '加载失败：' + e.message; }
+// ---------------- SVG 小图表 ----------------
+function donut(pct, big, small, color) {
+  pct = Math.max(0, Math.min(100, Math.round(pct)||0));
+  const r = 30, c = 2*Math.PI*r, off = c*(1-pct/100);
+  return `<svg width="86" height="86" viewBox="0 0 86 86" role="img">
+    <circle cx="43" cy="43" r="${r}" fill="none" stroke="rgba(125,125,135,.22)" stroke-width="9"></circle>
+    <circle cx="43" cy="43" r="${r}" fill="none" stroke="${color}" stroke-width="9" stroke-linecap="round"
+      stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}" transform="rotate(-90 43 43)"></circle>
+    <text x="43" y="41" text-anchor="middle" font-size="16" font-weight="700" fill="currentColor">${esc(big)}</text>
+    <text x="43" y="56" text-anchor="middle" font-size="9" fill="#888">${esc(small)}</text></svg>`;
+}
+function fillDays(list) {
+  const map = {}; (list || []).forEach(x => { map[x.date] = x.count; });
+  const out = [], today = new Date();
+  for (let i = 13; i >= 0; i--) { const dt = new Date(today.getTime() - i*86400000); const k = dkey(dt); out.push({ date: k, count: map[k]||0 }); }
+  return out;
+}
+function barChart(items) {
+  const max = Math.max(1, ...items.map(x => x.count));
+  const W = 560, H = 150, pad = 22, bw = (W - 2*pad) / items.length;
+  let bars = '';
+  items.forEach((x, i) => {
+    const h = Math.max(x.count ? 3 : 1, Math.round((x.count/max)*(H-72)));
+    const dw = bw*0.66, bx = pad + i*bw + (bw-dw)/2, by = H-30-h;
+    bars += `<g><title>${x.date}：完成 ${x.count} 页</title>
+      <rect x="${bx.toFixed(1)}" y="${by}" width="${dw.toFixed(1)}" height="${h}" rx="3" fill="${x.count ? '#2563eb' : 'rgba(125,125,135,.25)'}"></rect>` +
+      (x.count ? `<text x="${(bx+dw/2).toFixed(1)}" y="${by-5}" text-anchor="middle" font-size="10" fill="currentColor" opacity=".8">${x.count}</text>` : '') +
+      `<text x="${(bx+dw/2).toFixed(1)}" y="${H-13}" text-anchor="middle" font-size="8.5" fill="#888">${x.date.slice(5)}</text></g>`;
+  });
+  return `<svg class="barchart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${bars}</svg>`;
+}
+function progHtml(pct, color) {
+  pct = Math.max(0, Math.min(100, pct||0));
+  return `<div class="prog"><i style="width:${pct.toFixed(1)}%;${color?`background:${color}`:''}"></i></div>`;
+}
+function storeRow(label, used, total, color) {
+  const pct = total ? used/total*100 : 0;
+  return `<div class="srow"><span class="k">${esc(label)}</span><span class="v mono">${fmtBytes(used)}${total?` / ${fmtBytes(total)}`:''}${total?` · ${pct.toFixed(0)}%`:''}</span>${progHtml(pct, color)}</div>`;
+}
+function sysItem(k, v) { return `<div class="sysitem"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`; }
+
+function hdr() { return { 'X-API-Token': tokenInput.value.trim() }; }
+async function api(path, opts = {}) {
+  const r = await fetch(path, Object.assign({ headers: hdr() }, opts));
+  let body = null;
+  try { body = await r.json(); } catch (e) { /* ignore */ }
+  if (!r.ok) throw new Error((body && body.detail) || ('HTTP ' + r.status));
+  return body;
 }
 
-function render(d) {
-  // 模块一：后端执行
-  const be = d.backend || {}, eng = be.engine || {};
-  const q = eng.queue_size;
-  const queueTxt = (q && typeof q === 'object') ? (q.queue_size != null ? q.queue_size : JSON.stringify(q)) : (q != null ? q : '-');
-  let b1 = `<div class="cards">
-      ${cardHtml('引擎', pill(eng.ok, '在线', '离线'))}
-      ${cardHtml('数据库', pill(eng.db_ok, '正常', '异常'))}
-      ${cardHtml('Redis', pill(eng.redis_ok, '正常', '异常'))}
-      ${card('引擎队列', queueTxt)}
-    </div>`;
-  const jobs = be.jobs || [];
-  if (jobs.length) b1 += `<h3>最近任务</h3>` + table(['动作','状态','书','排队时间','完成时间'], jobs.map(j =>
-    `<tr><td class="mono">${esc(j.action)}</td><td>${statusBadge(j.status)}</td><td>${esc(j.title||j.book_id)}</td><td class="mono">${String(j.queued_at||'').slice(0,16)}</td><td class="mono">${String(j.finished_at||'').slice(0,16)}</td></tr>`));
-  const pages = be.pages || [];
-  if (pages.length) b1 += `<h3>最近翻译页</h3>` + table(['书','页','状态','Token','耗时(ms)','时间'], pages.map(p =>
-    `<tr><td>${esc(p.title)}</td><td class="mono">${(p.page_index??0)+1}</td><td>${statusBadge(p.status)}</td><td class="mono">${fmtTok(p.tokens)}</td><td class="mono">${p.elapsed_ms||0}</td><td class="mono">${String(p.updated_at||'').slice(0,16)}</td></tr>`));
+async function login() {
+  fail(''); clearInterval(S.jobsTimer);
+  const token = tokenInput.value.trim();
+  if (!token) { fail('请先填 X-API-Token'); return; }
+  try {
+    await api('/v1/admin/overview');
+    S.isAdmin = true;
+    document.getElementById('whoami').textContent = '已登录：管理员';
+  } catch (e) {
+    if (String(e.message).includes('不是管理员') || String(e.message).includes('HTTP 403')) {
+      S.isAdmin = false;
+      document.getElementById('whoami').textContent = '已登录：普通用户（只读）';
+    } else { fail('登录失败：' + e.message); return; }
+  }
+  buildTabs();
+  switchTab(0);
+}
 
-  // 模块二：用户记录
-  const um = d.users || {}, st = um.stats || {};
-  let b3 = `<div class="cards">
-      ${card('用户数', fmtTok(st.users))}
-      ${card('总 Token', fmtTok(st.tokens))}
-      ${card('书数', fmtTok(st.books))}
-      ${card('总页数', fmtTok(st.pages))}
-      ${card('已完成页', fmtTok(st.done_pages))}
-      ${card('失败页', fmtTok(st.failed_pages))}
-    </div>`;
-  const users = um.users || [];
-  if (users.length) b3 += `<h3>所有用户</h3>` + table(['用户 ID','Token','翻页数','创建','最后活跃'], users.map(u =>
-    `<tr><td class="mono">${esc(u.id)}</td><td class="mono">${fmtTok(u.token_used)}</td><td class="mono">${fmtTok(u.page_count)}</td><td class="mono">${String(u.created_at||'').slice(0,10)}</td><td class="mono">${String(u.last_active_at||'').slice(0,16)}</td></tr>`));
-  const books = um.books || [];
-  if (books.length) b3 += `<h3>每本书</h3>` + table(['书名','状态','总页数','已翻','失败','Token'], books.map(b =>
-    `<tr><td>${esc(b.title)}</td><td>${b.synced?'<span class="pill synced">已同步</span>':'<span class="pill local">本地</span>'}</td><td class="mono">${b.pages||0}</td><td class="mono ok">${b.done_pages||0}</td><td class="mono bad">${b.failed_pages||0}</td><td class="mono">${fmtTok(b.tokens)}</td></tr>`));
-
-  document.getElementById('root').innerHTML =
-    `<div id="tab0">${b1}</div><div id="tab1" style="display:none">${b3}</div>`;
+function buildTabs() {
+  const names = S.isAdmin ? ADMIN_TABS : USER_TABS;
+  const el = document.getElementById('tabs');
+  el.style.display = 'flex';
+  el.innerHTML = names.map((n, i) => `<button class="tab" id="tabBtn${i}" onclick="switchTab(${i})">${n}</button>`).join('');
 }
 
 function switchTab(i) {
-  for (let k = 0; k < 2; k++) {
-    document.getElementById('tab' + k).style.display = (k === i) ? 'block' : 'none';
-    document.getElementById('tabBtn' + k).className = (k === i) ? 'tab active' : 'tab';
+  S.tab = i;
+  const names = S.isAdmin ? ADMIN_TABS : USER_TABS;
+  for (let k = 0; k < names.length; k++) {
+    const b = document.getElementById('tabBtn' + k), t = document.getElementById('tab' + k);
+    if (b) b.className = (k === i) ? 'tab active' : 'tab';
+    if (t) t.style.display = (k === i) ? 'block' : 'none';
+  }
+  clearInterval(S.jobsTimer);
+  if (S.isAdmin) {
+    if (i === 0) loadOverview();
+    if (i === 1) loadUsers();
+    if (i === 2) loadBooks();
+    if (i === 3) { loadJobs(); S.jobsTimer = setInterval(() => { if (document.getElementById('autoJobs').checked) loadJobs(); }, 8000); }
+    if (i === 4) loadReleases();
+  } else loadMine();
+}
+
+// ---------------- Tab 0：概览 ----------------
+async function loadOverview() {
+  const root = document.getElementById('root');
+  root.innerHTML = '<div class="hint">加载中…</div>';
+  try { S.data.overview = await api('/v1/admin/overview'); }
+  catch (e) { root.innerHTML = `<div class="err">加载失败：${esc(e.message)}</div>`; return; }
+  renderOverview();
+}
+
+function renderOverview() {
+  const d = S.data.overview; if (!d) return;
+  PG_CB.ovJobs = renderOverview; PG_CB.ovPages = renderOverview;
+  const be = d.backend || {}, eng = be.engine || {}, st = (d.users || {}).stats || {}, rt = be.runtime || {};
+  const q = eng.queue_size;
+  const queueTxt = (q && typeof q === 'object') ? (q.queue_size != null ? q.queue_size : JSON.stringify(q)) : (q != null ? q : '-');
+  const totalPages = Number(st.pages) || 0, donePages = Number(st.done_pages) || 0, failedPages = Number(st.failed_pages) || 0;
+  const donePct = totalPages ? donePages/totalPages*100 : 0;
+  const failPct = totalPages ? failedPages/totalPages*100 : 0;
+
+  // 状态条
+  let html = `<div class="strip">
+      <span class="sitem"><i class="dot ${eng.ok?'on':'off'}"></i>引擎 ${eng.ok?'在线':'离线'}${eng.latency_ms!=null?` · <span class="mono">${eng.latency_ms}ms</span>`:''}</span>
+      <span class="sitem"><i class="dot ${eng.db_ok?'on':'off'}"></i>MySQL ${eng.db_ok?'正常':'异常'}</span>
+      <span class="sitem"><i class="dot ${eng.redis_ok?'on':'off'}"></i>Redis ${eng.redis_ok?'正常':'异常'}</span>
+      <span class="sitem"><i class="dot on"></i>API 已运行 <b class="mono">${fmtDur(rt.api_uptime_s)}</b></span>
+      <span style="flex:1"></span>
+      <button class="btn sm ghost" onclick="loadOverview()">刷新</button>
+    </div>`;
+
+  // 仪表行
+  html += `<div class="cards">
+      <div class="card row kpi-wrap">${donut(donePct, donePct.toFixed(0)+'%', '完成率', '#16a34a')}
+        <div class="txt"><div class="k">翻译完成</div><div class="v mono">${fmtTok(donePages)}<span class="hint"> / ${fmtTok(totalPages)} 页</span></div><div class="sub">done 页 / 全部页</div></div></div>
+      <div class="card row kpi-wrap">${donut(failPct, String(failedPages), '失败页', '#dc2626')}
+        <div class="txt"><div class="k">失败页</div><div class="v mono">${failPct.toFixed(1)}%</div><div class="sub">重译请在 App 内操作</div></div></div>
+      ${card('活跃任务', fmtTok(st.active_jobs), '排队 + 进行中')}
+      ${card('引擎队列', queueTxt, '翻译管线排队长度')}
+      ${card('累计 Token', fmtTok(st.tokens), '全部用户合计')}
+    </div>`;
+
+  // 图表 + 存储/系统两栏
+  const days = fillDays(be.daily_done);
+  const dayMax = Math.max(0, ...days.map(x => x.count));
+  const diskU = Number(rt.disk_used_bytes), diskT = Number(rt.disk_total_bytes);
+  const memU = Number(rt.mem_used_bytes), memT = Number(rt.mem_total_bytes);
+  html += `<div class="cols">
+      <div class="panel"><h4>近 14 天翻译活动（每日完成页数${dayMax ? ` · 峰值 ${dayMax}` : ''}）</h4>${barChart(days)}</div>
+      <div>
+        <div class="panel"><h4>存储（数据卷）</h4>
+          ${storeRow('云端书', Number(st.cloud_bytes)||0, diskT || undefined)}
+          ${storeRow('翻译缓存', Number(st.cache_bytes)||0, diskT || undefined)}
+          ${storeRow('安装包', Number(st.releases_bytes)||0, diskT || undefined)}
+          ${storeRow('磁盘整体', diskU||0, diskT||0, diskT && diskU/diskT > 0.85 ? '#dc2626' : '')}
+        </div>
+        <div class="panel"><h4>系统</h4>
+          <div class="sysgrid">
+            ${sysItem('API 启动于', String(rt.api_started_at||'-').slice(5,16))}
+            ${sysItem('已运行', fmtDur(rt.api_uptime_s))}
+            ${sysItem('Python', rt.python || '-')}
+            ${sysItem('负载（1/5/15min）', rt.loadavg ? rt.loadavg.split(' ').slice(0,3).join(' ') : '-')}
+          </div>
+          ${memT ? storeRow('容器内存', memU||0, memT, memU/memT > 0.9 ? '#dc2626' : '') : ''}
+        </div>
+      </div>
+    </div>`;
+
+  // 用户/书概览
+  html += `<div class="cards" style="margin-top:14px">
+      ${card('用户', fmtTok(st.users), st.admins ? `管理员 ${fmtTok(st.admins)}` : '')}
+      ${card('书', fmtTok(st.books))}
+      ${card('总页数', fmtTok(totalPages))}
+      ${card('已翻页', fmtTok(donePages))}
+    </div>`;
+
+  // 最近任务 / 最近翻译页（分页）
+  const jobs = be.jobs || [];
+  const jv = slice('ovJobs', jobs);
+  html += `<h3>最近任务</h3>` + table(['动作','状态','书','排队','完成'], jv.rows.map(j =>
+    `<tr><td class="mono">${esc(j.action)}</td><td>${statusBadge(j.status)}</td><td>${esc(j.title || j.book_id || '-')}</td><td class="mono">${String(j.queued_at||'').slice(0,16)}</td><td class="mono">${String(j.finished_at||'').slice(0,16)}</td></tr>`))
+    + pagerHtml('ovJobs', jv);
+  const pages = be.pages || [];
+  const pv = slice('ovPages', pages);
+  html += `<h3>最近翻译页</h3>` + table(['书','页','状态','Token','耗时(ms)','时间'], pv.rows.map(p =>
+    `<tr><td>${esc(p.title)}</td><td class="mono">${(p.page_index ?? 0)+1}</td><td>${statusBadge(p.status)}</td><td class="mono">${fmtTok(p.tokens)}</td><td class="mono">${p.elapsed_ms||0}</td><td class="mono">${String(p.updated_at||'').slice(0,16)}</td></tr>`))
+    + pagerHtml('ovPages', pv);
+
+  document.getElementById('root').innerHTML = `<div id="tab0">${html}</div>`;
+  mountHiddenTabs();
+}
+
+// ---------------- Tab 1：用户 ----------------
+async function loadUsers() {
+  const root = document.getElementById('root');
+  let d;
+  try { d = await api('/v1/admin/users'); } catch (e) { root.innerHTML = `<div class="err">加载失败：${esc(e.message)}</div>`; return; }
+  S.data.users = d.users || [];
+  let html = `<div class="toolbar"><span class="hint">管理员标记与数据归属；删除会清掉该用户全部云端数据（Key 本身不吊销）</span></div>`;
+  html += table(['ID', '昵称', '身份', '书', '已翻页', '失败页', '云端存储', '翻页数', '最后活跃', '操作'], S.data.users.map(u => {
+    const id = String(u.id);
+    return `<tr>
+      <td class="mono">${esc(id)}</td>
+      <td>${esc(u.name || '-')}</td>
+      <td>${u.is_admin ? '<span class="pill admin">管理员</span>' : '<span class="pill local">普通</span>'}</td>
+      <td class="mono">${u.book_count || 0}</td>
+      <td class="mono ok">${u.done_pages || 0}</td>
+      <td class="mono bad">${u.failed_pages || 0}</td>
+      <td class="mono">${fmtBytes(u.cloud_bytes)}</td>
+      <td class="mono">${fmtTok(u.page_count)}</td>
+      <td class="mono">${String(u.last_active_at||'').slice(0,16)}</td>
+      <td class="actions">
+        <button class="btn sm ghost" onclick="renameUser('${id}')">改名</button>
+        <button class="btn sm ghost" onclick="toggleAdmin('${id}')">${u.is_admin ? '撤管理员' : '设管理员'}</button>
+        <button class="btn sm danger" onclick="deleteUser('${id}')">删除</button>
+      </td></tr>`;
+  }));
+  root.innerHTML = `<div id="tab1">${html}</div>`;
+  mountHiddenTabs();
+}
+
+async function renameUser(id) {
+  const u = (S.data.users || []).find(x => String(x.id) === String(id));
+  const name = prompt('新昵称（留空清除）：', (u && u.name) || '');
+  if (name === null) return;
+  try { await api(`/v1/admin/users/${id}`, { method: 'PATCH', headers: Object.assign({'Content-Type':'application/json'}, hdr()), body: JSON.stringify({ name }) }); flash('已改名'); loadUsers(); }
+  catch (e) { alert('失败：' + e.message); }
+}
+
+async function toggleAdmin(id) {
+  const u = (S.data.users || []).find(x => String(x.id) === String(id));
+  if (!u) return;
+  const want = u.is_admin ? 0 : 1;
+  if (!confirm(want ? `把用户 ${id} 设为管理员？` : `撤销用户 ${id} 的管理员权限？`)) return;
+  try { await api(`/v1/admin/users/${id}`, { method: 'PATCH', headers: Object.assign({'Content-Type':'application/json'}, hdr()), body: JSON.stringify({ is_admin: want }) }); flash('已更新'); loadUsers(); }
+  catch (e) { alert('失败：' + e.message); }
+}
+
+async function deleteUser(id) {
+  if (!confirm(`删除用户 ${id}？\n将级联删除：全部书（云 zip+页文件）、任务、收藏夹、阅读进度、结果缓存。\nKey 本身不吊销（来自 app.env），下次请求会重建空账号。`)) return;
+  try { const r = await api(`/v1/admin/users/${id}`, { method: 'DELETE' }); flash(`已删除：${r.deleted_books} 本书、${r.deleted_cache_files} 个缓存文件`); loadUsers(); }
+  catch (e) { alert('失败：' + e.message); }
+}
+
+// ---------------- Tab 2：书籍 ----------------
+async function loadBooks(filter) {
+  const root = document.getElementById('root');
+  let d;
+  try { d = await api('/v1/admin/books'); } catch (e) { root.innerHTML = `<div class="err">加载失败：${esc(e.message)}</div>`; return; }
+  S.data.books = d.books || [];
+  PG.books.p = 1;
+  renderBooks(filter);
+}
+
+function renderBooks(filter) {
+  PG_CB.books = () => renderBooks();
+  const root = document.getElementById('root');
+  const f = (filter !== undefined) ? filter : (document.getElementById('bookQ') ? document.getElementById('bookQ').value : '');
+  if (filter !== undefined && document.getElementById('bookQ')) document.getElementById('bookQ').value = filter;
+  let rows = S.data.books || [];
+  if (f) { const fl = f.toLowerCase(); rows = rows.filter(b => (b.title || '').toLowerCase().includes(fl) || String(b.owner).includes(fl)); }
+  const v = slice('books', rows);
+  let html = `<div class="toolbar">
+      <input type="text" id="bookQ" placeholder="按书名 / 用户 ID 过滤" value="${esc(f)}" oninput="PG.books.p=1;renderBooks(this.value)">
+      <span class="hint">失败页看明细与错误；重译请在手机 App 内操作</span>
+    </div>`;
+  html += table(['书名', '用户', '格式', '状态', '页数', '已翻', '失败', '活跃任务', '体积', '操作'], v.rows.map(b => {
+    const bid = esc(b.id);
+    return `<tr>
+      <td style="max-width:340px;word-break:break-all">${esc(b.title || b.id)}</td>
+      <td class="mono">${esc(b.owner_name ? (b.owner_name + ' #' + b.owner) : ('#' + b.owner))}</td>
+      <td class="mono">${esc(b.format || '-')}</td>
+      <td>${b.synced ? '<span class="pill synced">已同步</span>' : '<span class="pill local">本地</span>'}</td>
+      <td class="mono">${b.page_count || 0}</td>
+      <td class="mono ok">${b.done_pages || 0}</td>
+      <td class="mono ${b.failed_pages ? 'bad' : ''}">${b.failed_pages || 0}</td>
+      <td class="mono">${b.active_jobs || 0}</td>
+      <td class="mono">${b.size ? fmtBytes(b.size) : '-'}</td>
+      <td class="actions">
+        ${b.failed_pages ? `<button class="btn sm ghost" onclick="showFailed('${bid}')">失败页</button>` : ''}
+        <button class="btn sm danger" onclick="deleteBook('${bid}')">删除</button>
+      </td></tr>`;
+  }));
+  html += pagerHtml('books', v);
+  html += `<div id="failedPanel"></div>`;
+  root.innerHTML = `<div id="tab2">${html}</div>`;
+  mountHiddenTabs();
+}
+
+async function showFailed(bid) {
+  const panel = document.getElementById('failedPanel');
+  panel.innerHTML = '<div class="hint">加载失败页明细…</div>';
+  let d;
+  try { d = await api(`/v1/admin/books/${bid}/failed-pages`); } catch (e) { panel.innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  const rows = d.failed || [];
+  const b = (S.data.books || []).find(x => x.id === bid);
+  panel.innerHTML = `<div class="panel"><b>失败页明细：${esc((b && b.title) || bid)}</b>
+    <span class="hint" style="margin-left:10px">共 ${rows.length} 页失败 · 重译请在手机 App 内操作（管理台不保存翻译凭据）</span>
+    ${rows.length ? table(['页码', '尝试次数', '错误', '时间'], rows.map(p =>
+      `<tr><td class="mono">${p.page_index + 1}</td><td class="mono">${p.attempts || 0}</td><td class="errmsg">${esc((p.error || '').slice(0, 300))}</td><td class="mono">${String(p.updated_at||'').slice(0,16)}</td></tr>`)) : '<div class="hint" style="margin-top:8px">（没有失败页）</div>'}
+  </div>`;
+}
+
+async function deleteBook(bid) {
+  const b = (S.data.books || []).find(x => x.id === bid);
+  if (!confirm(`删除书「${(b && b.title) || bid}」？\n取消其任务，级联删除 DB 记录、云 zip、磁盘页文件。不可恢复。`)) return;
+  try { const r = await api(`/v1/admin/books/${bid}`, { method: 'DELETE' }); flash(`已删除（${r.deleted_pages} 页）`); loadBooks(); }
+  catch (e) { alert('失败：' + e.message); }
+}
+
+// ---------------- Tab 3：任务 ----------------
+async function loadJobs() {
+  const root = document.getElementById('root');
+  let d;
+  try { d = await api('/v1/admin/jobs'); } catch (e) { root.innerHTML = `<div class="err">加载失败：${esc(e.message)}</div>`; return; }
+  S.data.jobs = d;
+  renderJobs();
+}
+
+function renderJobs() {
+  PG_CB.jobsFailed = renderJobs; PG_CB.jobsDone = renderJobs;
+  const root = document.getElementById('root');
+  const d = S.data.jobs || {};
+  const active = d.active || [], failed = d.failed || [], done = d.done || [];
+  let html = `<div class="toolbar">
+      <label class="hint"><input type="checkbox" id="autoJobs" checked> 每 8 秒自动刷新</label>
+      <button class="btn sm ghost" onclick="loadJobs()">立即刷新</button>
+    </div>`;
+  html += `<h3>排队 / 进行中（${active.length}）</h3>` + table(['动作', '状态', '书', '页', '用户', '排队时间', '操作'], active.map(j =>
+    `<tr><td class="mono">${esc(j.action)}</td><td>${statusBadge(j.status)}</td><td>${esc(j.title || j.book_id || '-')}</td><td class="mono">${j.target_page_index != null ? j.target_page_index + 1 : '-'}</td><td class="mono">#${esc(j.owner)}</td><td class="mono">${String(j.queued_at||'').slice(0,16)}</td>
+     <td><button class="btn sm danger" onclick="cancelJob('${esc(j.id)}')">取消</button></td></tr>`));
+  const fv = slice('jobsFailed', failed);
+  html += `<h3>失败（最近 ${failed.length}）</h3>` + table(['动作', '书', '页', '用户', '尝试', '错误', '时间', '操作'], fv.rows.map(j =>
+    `<tr><td class="mono">${esc(j.action)}</td><td>${esc(j.title || j.book_id || '-')}</td><td class="mono">${j.target_page_index != null ? j.target_page_index + 1 : '-'}</td><td class="mono">#${esc(j.owner)}</td><td class="mono">${j.attempts || 0}</td><td class="errmsg">${esc((j.error || '').slice(0, 200))}</td><td class="mono">${String(j.finished_at||'').slice(0,16)}</td>
+     <td>${j.book_id ? `<button class="btn sm ghost" onclick="gotoBook('${esc(j.book_id)}')">看失败页</button>` : '-'}</td></tr>`))
+    + pagerHtml('jobsFailed', fv);
+  const dv = slice('jobsDone', done);
+  html += `<h3>最近完成（${done.length}）</h3>` + table(['动作', '书', '页', '用户', '完成时间'], dv.rows.map(j =>
+    `<tr><td class="mono">${esc(j.action)}</td><td>${esc(j.title || j.book_id || '-')}</td><td class="mono">${j.target_page_index != null ? j.target_page_index + 1 : '-'}</td><td class="mono">#${esc(j.owner)}</td><td class="mono">${String(j.finished_at||'').slice(0,16)}</td></tr>`))
+    + pagerHtml('jobsDone', dv);
+  root.innerHTML = `<div id="tab3">${html}</div>`;
+  mountHiddenTabs();
+}
+
+async function cancelJob(id) {
+  if (!confirm('取消该任务？')) return;
+  try { await api(`/v1/admin/jobs/${id}/cancel`, { method: 'POST' }); flash('已取消'); loadJobs(); } catch (e) { alert('失败：' + e.message); }
+}
+function gotoBook(bid) { if (!bid) return; switchTab(2); setTimeout(() => showFailed(bid), 400); }
+
+// ---------------- Tab 4：版本发布 ----------------
+async function loadReleases() {
+  const root = document.getElementById('root');
+  let d;
+  try { d = await api('/v1/admin/releases'); } catch (e) { root.innerHTML = `<div class="err">加载失败：${esc(e.message)}</div>`; return; }
+  S.data.releases = d.releases || [];
+  const rows = S.data.releases;
+  let html = `<h3>发布新版本（APK 上传即发布，幂等：同渠道同版本号覆盖）</h3>
+    <div class="panel">
+      <div class="formgrid">
+        <div><label>APK 文件</label><input type="file" id="relFile" accept=".apk"></div>
+        <div><label>version_code *</label><input type="number" id="relCode" placeholder="如 56"></div>
+        <div><label>version_name *</label><input type="text" id="relName" placeholder="如 1.6.12"></div>
+        <div><label>channel</label><input type="text" id="relChannel" value="stable"></div>
+        <div><label>abi</label><input type="text" id="relAbi" value="universal"></div>
+        <div><label>min_version_code（低于此值强制更新）</label><input type="number" id="relMin" value="0"></div>
+      </div>
+      <div style="margin-bottom:10px"><label class="hint"><input type="checkbox" id="relForce"> 强制更新</label></div>
+      <div style="margin-bottom:10px"><label style="font-size:12px;color:#777;display:block;margin-bottom:3px">更新日志</label><textarea id="relLog" rows="3" style="width:100%;max-width:640px;padding:7px 9px;border:1px solid #ccc;border-radius:6px;font-size:13px;background:inherit;color:inherit"></textarea></div>
+      <button class="btn" id="relBtn" onclick="uploadRelease()">上传并发布</button>
+      <span class="hint" id="relUp" style="margin-left:10px"></span>
+    </div>
+    <h3>版本列表</h3>` +
+    table(['版本', 'code', '渠道/abi', '强制', '大小', 'sha256（前 12）', '状态', '发布时间', '操作'], rows.map(r =>
+      `<tr>
+        <td>${esc(r.version_name)}</td>
+        <td class="mono">${r.version_code}</td>
+        <td class="mono">${esc(r.channel)}/${esc(r.abi)}</td>
+        <td>${(r.force || r.min_version_code > 0) ? '<span class="pill off">强制</span>' : '-'}</td>
+        <td class="mono">${fmtBytes(r.size)}</td>
+        <td class="mono">${esc(String(r.sha256 || '').slice(0, 12))}</td>
+        <td>${r.enabled ? '<span class="pill on">已发布</span>' : '<span class="pill local">已下架</span>'}</td>
+        <td class="mono">${String(r.created_at||'').slice(0,16)}</td>
+        <td class="actions">
+          ${r.enabled ? `<button class="btn sm ghost" onclick="toggleRelease(${r.id}, 0)">下架</button>`
+                      : `<button class="btn sm" onclick="toggleRelease(${r.id}, 1)">重新上架</button>`}
+          <a class="btn sm ghost" style="text-decoration:none;display:inline-block" href="/v1/app/releases/${r.id}/download">下载</a>
+        </td></tr>`));
+  html += `<h3>更新模拟器</h3>
+    <div class="panel">
+      <div class="toolbar">
+        <input type="number" id="prevCode" placeholder="模拟 App 当前 version_code" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;font-size:13px">
+        <button class="btn sm ghost" onclick="previewUpdate()">查 /v1/app/update 会返回什么</button>
+      </div>
+      <pre id="prevOut" style="display:none"></pre>
+    </div>`;
+  root.innerHTML = `<div id="tab4">${html}</div>`;
+  mountHiddenTabs();
+}
+
+async function uploadRelease() {
+  const f = document.getElementById('relFile').files[0];
+  const code = parseInt(document.getElementById('relCode').value, 10);
+  const name = document.getElementById('relName').value.trim();
+  const btn = document.getElementById('relBtn'), up = document.getElementById('relUp');
+  if (!f || !code || !name) { alert('文件、version_code、version_name 都要填'); return; }
+  const fd = new FormData();
+  fd.append('file', f);
+  fd.append('version_code', code);
+  fd.append('version_name', name);
+  fd.append('channel', document.getElementById('relChannel').value.trim() || 'stable');
+  fd.append('abi', document.getElementById('relAbi').value.trim() || 'universal');
+  fd.append('min_version_code', parseInt(document.getElementById('relMin').value, 10) || 0);
+  fd.append('force', document.getElementById('relForce').checked);
+  fd.append('changelog', document.getElementById('relLog').value);
+  btn.disabled = true; up.textContent = '上传中…（大文件请等一会）';
+  try {
+    const r = await fetch('/v1/app/releases', { method: 'POST', headers: hdr(), body: fd });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.detail || ('HTTP ' + r.status));
+    up.textContent = `发布成功：${body.size} 字节，sha256 ${String(body.sha256).slice(0, 12)}…`;
+    loadReleases();
+  } catch (e) { up.textContent = ''; alert('上传失败：' + e.message); }
+  btn.disabled = false;
+}
+
+async function toggleRelease(id, enable) {
+  if (!confirm(enable ? '重新上架该版本？' : '下架该版本？（App 更新接口不再下发，历史保留）')) return;
+  try {
+    await api(`/v1/admin/releases/${id}/${enable ? 'enable' : ''}`.replace(/\/$/, ''), { method: enable ? 'POST' : 'DELETE' });
+    flash(enable ? '已上架' : '已下架'); loadReleases();
+  } catch (e) { alert('失败：' + e.message); }
+}
+
+async function previewUpdate() {
+  const code = parseInt(document.getElementById('prevCode').value, 10) || 0;
+  const out = document.getElementById('prevOut');
+  try { const r = await api(`/v1/admin/update-preview?version_code=${code}`); out.style.display = 'block'; out.textContent = JSON.stringify(r, null, 2); }
+  catch (e) { out.style.display = 'block'; out.textContent = '出错：' + e.message; }
+}
+
+// ---------------- 普通用户只读视图 ----------------
+async function loadMine() {
+  const root = document.getElementById('root');
+  root.innerHTML = '<div class="hint">加载中…</div>';
+  let usage = null, books = null;
+  try {
+    const [u, b] = await Promise.all([ api('/v1/usage'), api('/v1/books') ]);
+    usage = u.usage; books = b.books || [];
+  } catch (e) { root.innerHTML = `<div class="err">加载失败：${esc(e.message)}</div>`; return; }
+  let html = `<div class="hint" style="margin-bottom:10px">当前账号不是管理员，只显示自己的数据。</div>`;
+  if (usage) html += `<div class="cards">
+      ${card('用户 ID', usage.id ?? '-')}
+      ${card('昵称', usage.name || '-')}
+      ${card('累计翻页', fmtTok(usage.page_count))}
+      ${card('最后活跃', String(usage.last_active_at || '').slice(0, 16))}
+    </div>`;
+  html += `<h3>我的书（${books.length}）</h3>` + table(['书名', '格式', '页数', '同步'], books.map(b =>
+    `<tr><td style="max-width:420px;word-break:break-all">${esc(b.title || b.id)}</td><td class="mono">${esc(b.format || '-')}</td><td class="mono">${b.page_count || '-'}</td><td>${b.zip_path != null ? '<span class="pill synced">已同步</span>' : '<span class="pill local">本地</span>'}</td></tr>`));
+  root.innerHTML = `<div id="tab0">${html}</div>`;
+}
+
+// ---------------- 通用 ----------------
+function mountHiddenTabs() {
+  const names = S.isAdmin ? ADMIN_TABS : USER_TABS;
+  const root = document.getElementById('root');
+  for (let k = 0; k < names.length; k++) {
+    let el = document.getElementById('tab' + k);
+    if (!el) { el = document.createElement('div'); el.id = 'tab' + k; root.appendChild(el); }
+    el.style.display = (k === S.tab) ? 'block' : 'none';
   }
 }
 
-if (tokenInput.value) load();
+if (tokenInput.value) login();
 </script>
 </body>
 </html>

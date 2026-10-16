@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS users (
   id             BIGINT AUTO_INCREMENT PRIMARY KEY,
   api_key_hash   CHAR(64) NOT NULL UNIQUE,    -- SHA-256(API Key)，鉴权时用它找用户
   name           VARCHAR(128) NULL,           -- 可选昵称
+  is_admin       TINYINT(1) NOT NULL DEFAULT 0, -- 管理员（管理平台权限）
   token_used     BIGINT NOT NULL DEFAULT 0,   -- 累计 token 消耗（引擎暂未上报，预留）
   page_count     INT NOT NULL DEFAULT 0,      -- 累计翻页次数（含重译）
   created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
