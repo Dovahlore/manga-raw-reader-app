@@ -152,6 +152,8 @@ class RemoteControlManager(
         connectedControllerName = controllerName.ifBlank { "遥控器" }.take(40)
         connectedControllerId = controllerId
         acceptedControllerId = null
+        // 修复（03-高2 残留）：新配对会话即 pending——同步收回翻页能力，不等 Consent 下一帧压制
+        readerInteractionAllowed = false
         lastSeenAt = System.currentTimeMillis()
         lastPairRejectReason = null
         token
@@ -282,8 +284,7 @@ class RemoteControlManager(
         }
     }
 
-    /** 修复（03-中7）：当前连入控制器的稳定 id，供 Consent 层做 id 级接受判定（名字仅用于展示）。 */
-    /** 修复（03-中7）：当前连入控制器的稳定 id，供 Consent 层做 id 级接受判定（名字仅用于展示）。 */
+    /** 修复（03-高2）：会话结束/未决时立即收回远端翻页能力（Consent 在会话边界调用）。 */
     fun clearReaderInteractionAllowed() {
         readerInteractionAllowed = false
     }
@@ -321,6 +322,9 @@ class RemoteControlManager(
 
     private fun expireSilentController() {
         synchronized(lock) {
+            // 修复（02-低5 瑕疵）：顺带清理已过期的挂起表，防缓慢累积
+            val pruneBefore = System.currentTimeMillis()
+            suspendedUntil.entries.removeIf { it.value <= pruneBefore }
             if ((connectedControllerName != null || connectedControllerId != null) &&
                 System.currentTimeMillis() - lastSeenAt > 6_000
             ) {
@@ -347,6 +351,10 @@ class RemoteControlManager(
         if (isSuspendedInternal(device.deviceId)) return false
         val activeControllerId = connectedControllerId
         if (activeControllerId != null && activeControllerId != device.deviceId) return false
+        if (activeControllerId == null || activeControllerId != device.deviceId) {
+            // 修复（03-高2 残留）：换控制器连入=新会话，同步收回翻页能力待 Consent 重新确认
+            readerInteractionAllowed = false
+        }
         connectedControllerName = device.name.ifBlank { "遥控器" }.take(40)
         connectedControllerId = device.deviceId
         acceptedControllerId = device.deviceId

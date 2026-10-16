@@ -360,6 +360,26 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                             )
                         }
                     }
+                    // 修复（03-低12/P7）：控制端「遥控中」指示（区别于上方被控端状态）——点击即断开
+                    if (app.remoteControl.connectedControllerName == null) {
+                        app.remoteControllerConnection?.let { conn ->
+                            Text(
+                                "遥控中 · ${conn.device.name.take(8)} · 点击断开",
+                                color = Color.White,
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .align(Alignment.Center)
+                                    .widthIn(max = 160.dp)
+                                    .clickable {
+                                        app.disconnectRemoteController()
+                                        keepUiAlive()
+                                    }
+                                    .padding(horizontal = 8.dp),
+                            )
+                        }
+                    }
                     Button(
                         onClick = { keepUiAlive(); vm.translateCurrent() },
                         enabled = status != PageStatus.RUNNING || vm.translationStale,

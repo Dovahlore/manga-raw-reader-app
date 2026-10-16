@@ -597,6 +597,8 @@ class TranslationApi {
                 onProgress?.invoke(resumeFrom, resumeFrom)
                 return@withContext resumeFrom
             }
+            // 修复（D5/05-中9 配套）：非 2xx（除上方 416 已下完）不允许把失败响应体写进 .part
+            if (!resp.isSuccessful) throw ApiHttpException(resp.code, "HTTP ${resp.code}")
             val body = resp.body ?: throw IllegalStateException("空响应")
             val append = resp.code == 206 && resumeFrom > 0
             val remaining = body.contentLength()

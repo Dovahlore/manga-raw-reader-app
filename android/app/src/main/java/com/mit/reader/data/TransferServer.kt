@@ -48,6 +48,8 @@ class TransferServer(
     private val remoteHeartbeat: (token: String) -> RemoteHostStatus,
     private val remoteCommand: (token: String, action: RemotePageAction, requestId: String) -> RemoteCommandAck,
     private val isTransferAuthorized: (token: String) -> Boolean,
+    /** 最近一次 pair 被拒原因（宿主本地诊断）——透传给控制端，锁定/未开被控不再只有通用文案。 */
+    private val lastPairReject: (() -> String?)? = null,
 ) : NanoHTTPD(pickTransferBindPort()) {
     private companion object {
         const val MAX_MANIFEST_BYTES = 1L * 1024 * 1024
@@ -88,6 +90,10 @@ class TransferServer(
     // 修复（02-中2）：注册状态只由 NSD 回调翻转，不再乐观置位；listener 每次注册/注销独立新建。
     // onRegistrationFailed 自动重试一次的闸门（startReceiver/setDiscoverable 开启时复位）。
     private var nsdRetryUsed = false
+
+    /** 修复（V5-中1）：保存注册时的 listener 实例——AOSP 注销要求同一实例，
+     *  新建实例会抛 listener not registered 被吞，导致关「可被发现」后服务仍广播到进程退出。 */
+    @Volatile private var activeRegListener: NsdManager.RegistrationListener? = null
 
     /** 修复（02-中11）：接收服务启动失败向前台暴露（ReaderApp 透传到设备页红字提示）。 */
     val startError = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
@@ -139,7 +145,10 @@ class TransferServer(
             .filterIsInstance<Inet4Address>()
             .firstOrNull { !it.isLoopbackAddress && it.isSiteLocalAddress }
             ?: return null
-        return "${address.hostAddress}:${getListeningPort()}"
+        // 修复（02-中11 瑕疵）：服务未起来（端口无效）时不报假地址
+        val port = getListeningPort()
+        if (port <= 0) return null
+        return "${address.hostAddress}:$port"
     }
 
     private fun registerService(port: Int) {
@@ -157,6 +166,9 @@ class TransferServer(
                     android.util.Log.i("TransferServer", "NSD 服务已注册: ${info.serviceName}")
                 }
 
+                override fun onServiceUnregistered(info: NsdServiceInfo) {
+                    onNsdUnregistered(this)
+                }
                 override fun onRegistrationFailed(info: NsdServiceInfo, errorCode: Int) {
                     nsdRegistered = false
                     android.util.Log.w("TransferServer", "NSD 注册失败 errorCode=$errorCode")
@@ -169,27 +181,39 @@ class TransferServer(
                     }
                 }
 
-                override fun onServiceUnregistered(info: NsdServiceInfo) {}
                 override fun onUnregistrationFailed(info: NsdServiceInfo, errorCode: Int) {}
             }
+            activeRegListener = listener
             nsdManager.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
         }
     }
 
-    private fun unregisterService() {
-        // 修复（02-中2）：注销同样用独立 listener，nsdRegistered 只在确认回调里置 false
-        val listener = object : NsdManager.RegistrationListener {
-            override fun onServiceRegistered(info: NsdServiceInfo) {}
-            override fun onRegistrationFailed(info: NsdServiceInfo, errorCode: Int) {}
-            override fun onServiceUnregistered(info: NsdServiceInfo) {
-                nsdRegistered = false
-            }
-            override fun onUnregistrationFailed(info: NsdServiceInfo, errorCode: Int) {
-                nsdRegistered = false
-                android.util.Log.w("TransferServer", "NSD 注销失败 errorCode=$errorCode")
+    /** 修复（02-中2 残留）：注销落地时若开关又已打开（快速关→开竞态），立即补注册，
+     *  避免「显示可被发现但实际未广播」的假可发现；若期间已有更新的注册接管
+     *  （activeRegListener 换人），本回调不动状态、不重复注册。 */
+    private fun onNsdUnregistered(from: NsdManager.RegistrationListener) {
+        if (activeRegListener != null && activeRegListener !== from) return
+        nsdRegistered = false
+        if (discoverable && startError.value == null) {
+            mainHandler.post {
+                if (discoverable && !nsdRegistered && activeRegListener == null) {
+                    registerService(getListeningPort())
+                }
             }
         }
+    }
+
+    private fun unregisterService() {
+        // 修复（V5-中1）：注销必须复用注册时的同一 listener 实例（AOSP 契约），
+        // 否则 unregisterService 抛 listener not registered 被 runCatching 吞掉，服务照常广播
+        val listener = activeRegListener
+        activeRegListener = null
+        if (listener == null) {
+            nsdRegistered = false
+            return
+        }
         runCatching { nsdManager.unregisterService(listener) }
+        nsdRegistered = false
     }
 
     override fun serve(session: IHTTPSession): Response = try {
@@ -218,12 +242,15 @@ class TransferServer(
         val controllerId = body.optString("controllerId")
         val controllerEndpoint = body.optString("controllerEndpoint")
         val paired = remotePair(code, controllerName, controllerId, controllerEndpoint)
-            ?: return badRequest("配对码错误或阅读端未开启遥控")
+            ?: return badRequest(lastPairReject?.invoke()?.takeIf { it.isNotBlank() }
+                ?: "配对码错误或阅读端未开启遥控")
         return jsonResponse(JSONObject()
             .put("ok", true)
             .put("token", paired.token)
             .put("hostDeviceId", paired.hostDeviceId)
-            .put("hostName", paired.hostName))
+            .put("hostName", paired.hostName)
+            // 修复（02-中9 断链）：序列化 endpointMissing，控制端据此提示半残配对
+            .put("endpointMissing", paired.endpointMissing))
     }
 
     private fun handleRemoteHeartbeat(session: IHTTPSession): Response {
@@ -248,8 +275,10 @@ class TransferServer(
     private fun commandRateLimited(token: String): Boolean {
         val now = System.currentTimeMillis()
         if (commandTimestamps.size > 64) {
-            // 正常使用只有个位数凭据条目；陌生凭据洪泛撑大表时清空重来，防内存无界增长
-            commandTimestamps.clear()
+            // 修复（V2-②4）：先淘汰已过期窗口，仅在水表仍超限时整体清空——
+            // 防持有效凭据者交错伪造凭据触发 clear() 连带重置自己的限流窗口
+            commandTimestamps.entries.removeIf { (_, q) -> synchronized(q) { q.isEmpty() || now - q.last() >= 1000L } }
+            if (commandTimestamps.size > 64) commandTimestamps.clear()
         }
         val q = commandTimestamps.computeIfAbsent(token) { ArrayDeque() }
         synchronized(q) {
@@ -424,6 +453,8 @@ class TransferServer(
         val result = importBook(st.stagingDir, manifestJson)
         st.completed = true
         sessions.remove(sessionId)
+        // 修复（02-低5 瑕疵）：会话终结顺带清掉该会话的文件锁条目，防长期进程缓慢累积
+        fileLocks.keys.removeIf { it.startsWith("$sessionId/") }
         runCatching { st.stagingDir.deleteRecursively() }
         return jsonResponse(JSONObject().apply {
             put("ok", true)
@@ -459,7 +490,19 @@ class TransferServer(
             }
             buf.copyOf(off)
         } else {
-            session.inputStream.readBytes()
+            // 修复（05-低7/P9）：无 Content-Length 的请求体加 8MB 硬顶，防未认证端点读爆内存
+            val cap = 8L * 1024 * 1024
+            val out = java.io.ByteArrayOutputStream()
+            val buf = ByteArray(64 * 1024)
+            var total = 0L
+            while (true) {
+                val n = session.inputStream.read(buf)
+                if (n <= 0) break
+                total += n
+                require(total <= cap) { "请求体过大" }
+                out.write(buf, 0, n)
+            }
+            out.toByteArray()
         }
         return String(bytes, Charsets.UTF_8)
     }
@@ -474,7 +517,6 @@ class TransferServer(
         return st
     }
 
-    /** 修复（02-低2）：每 10 分钟后台清扫过期会话——复用 validSession 的超时判断（命中即移除并删 staging）。 */
     /** 修复（02-低2）：每 10 分钟后台清扫过期会话——复用 validSession 的超时判断（命中即移除并删 staging）。 */
     private fun startSessionSweeper() {
         if (sessionSweeper != null) return

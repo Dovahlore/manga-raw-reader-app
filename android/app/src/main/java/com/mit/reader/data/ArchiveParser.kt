@@ -165,6 +165,12 @@ object ArchiveParser {
     /** unrar5j 会往 stdout 打进度条，解压期间临时静音（用锁串行，避免并发互相抢 System.out）。 */
     private fun extractRar(pack: File, tmpDir: File) {
         synchronized(rarLock) {
+            // 修复（05-中3 残留）：RAR 的解压计数在解出之后（native 无法流式预算），
+            // 至少做空间预检——高压缩比 RAR 常见膨胀 2-5 倍，按 2 倍+64MB 估，不足直接拒绝
+            val needBytes = pack.length() * 2 + 64L * 1024 * 1024
+            if (tmpDir.usableSpace < needBytes) {
+                throw IllegalStateException("RAR 文件过大或设备空间不足，已中止导入")
+            }
             val realOut = System.out
             val realErr = System.err
             System.setOut(PrintStream(NullSink))

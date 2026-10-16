@@ -36,6 +36,19 @@ class LibraryRepository(private val context: Context) {
     private val importMutex = Semaphore(1)
     @Volatile private var indexCache: IndexData? = null
 
+    // 修复（05-中1 残留 C 链）：本次进程曾从 index.json.bak 恢复过索引——bak 可能落后
+    // 最后一次写，恢复出的 ids 会把「恢复前刚导入的书」当孤儿删，需跳过本轮清理
+    @Volatile private var restoredFromBackupThisRun = false
+
+    private val storagePrefs = context.getSharedPreferences("library_storage", Context.MODE_PRIVATE)
+
+    private fun prefsKnownStorageRoots(): MutableSet<String> =
+        storagePrefs.getStringSet("known_roots", emptySet())?.toMutableSet() ?: mutableSetOf()
+
+    private fun saveKnownStorageRoots(roots: Set<String>) {
+        storagePrefs.edit().putStringSet("known_roots", roots).apply()
+    }
+
     private data class IndexData(val books: List<Book>, val folders: List<Folder>)
 
     /** 导入结果：book 为最终那本书（重复时是已存在的那本）；duplicate 表示内容已存在、未新建。
@@ -708,6 +721,9 @@ class LibraryRepository(private val context: Context) {
         val ids = readIndexData().books.map { it.id }.toSet()
         // 索引缺失/暂时读不到时绝不能按“全部都是孤儿”清理，否则会把本地书全删。
         if (ids.isEmpty()) return@withContext
+        // 修复（05-中1 残留 C 链）：本次进程曾从 .bak 恢复过索引——bak 可能落后最后一次写，
+        // 恢复出的 ids 会把「恢复前刚导入的书」当孤儿删，跳过本轮清理（下次启动再跑）
+        if (restoredFromBackupThisRun) return@withContext
 
         // 1) 删每本书的 book.src（内容已解压到 pages/、hash 已存 index，源文件冗余 → 省一半空间）
         ids.forEach { id ->
@@ -1164,17 +1180,21 @@ class LibraryRepository(private val context: Context) {
                     if (m.optLong("title_changed_at", 0L) > 0L) titleChangedAt = m.optLong("title_changed_at", 0L)
                     if (m.optLong("mode_changed_at", 0L) > 0L) modeChangedAt = m.optLong("mode_changed_at", 0L)
                 }
+                // 修复（05-中3 残留）：云端 zip 解压接入解压预算——size 硬校验只封压缩后字节，
+                // 高压缩比 zip（服务端被黑/缓存投毒）仍可写满磁盘，与 EPUB 同型按流计数
+                val budget = ExtractBudget()
                 for (e in zip.entries()) {
                     if (e.isDirectory) continue
                     val name = e.name
                     when {
                         name == "book.src" ->
-                            zip.getInputStream(e).use { it.copyTo(File(dir, "book.src").outputStream()) }
+                            zip.getInputStream(e).use { BudgetedInputStream(it, budget).copyTo(File(dir, "book.src").outputStream()) }
                         name.startsWith("pages/") ->
-                            zip.getInputStream(e).use { it.copyTo(File(pagesDir, name.substringAfterLast('/')).outputStream()) }
+                            zip.getInputStream(e).use { BudgetedInputStream(it, budget).copyTo(File(pagesDir, name.substringAfterLast('/')).outputStream()) }
                         name.startsWith("translated/") ->
-                            zip.getInputStream(e).use { it.copyTo(File(translatedDir, name.substringAfterLast('/')).outputStream()) }
+                            zip.getInputStream(e).use { BudgetedInputStream(it, budget).copyTo(File(translatedDir, name.substringAfterLast('/')).outputStream()) }
                     }
+                    budget.addEntry()
                 }
             }
             completed = true
@@ -1647,7 +1667,10 @@ class LibraryRepository(private val context: Context) {
         // 损坏：先留证，再尝试从 index.json.bak 恢复；两者都没有才返回空列表。
         preserveCorruptIndex()
         val restored = restoreIndexFromBackup()
-        if (restored != null) return restored.also { indexCache = it }
+        if (restored != null) {
+            restoredFromBackupThisRun = true
+            return restored.also { indexCache = it }
+        }
         return IndexData(emptyList(), emptyList())
     }
 
@@ -1714,10 +1737,29 @@ class LibraryRepository(private val context: Context) {
      * 所以只要配置的 SD 库根不在位，就拒绝一切索引写（导入/删除/改名/移动/云下载/对传导入全部经过这里）。
      */
     private fun requireLibraryRootWritable() {
+        // 修复（05-高1 残留 B 链）：不只护「当前配置根」——切换过存储位置后旧书留在旧根
+        // （UI 明示「留在原位置仍显示」），旧根缺席窗口内整表写同样会把旧书条目抹掉、
+        // SD 归来后被 cleanupOrphans 物理删除。凡「曾经可用且存过书」的库根（落 prefs，
+        // 重启仍生效），当前任何一个缺席都拒绝写索引。
+        val externalRoots = context.getExternalFilesDirs(null).orEmpty().filterNotNull()
+        val known = prefsKnownStorageRoots()
+        (listOfNotNull(context.getExternalFilesDir(null), context.filesDir) + externalRoots)
+            .distinct()
+            .filter { it.isDirectory }
+            .forEach { root ->
+                val lib = File(root, "library")
+                if (lib.isDirectory && !lib.listFiles { f -> f.isDirectory }.isNullOrEmpty()) {
+                    known.add(root.absolutePath)
+                }
+            }
+        saveKnownStorageRoots(known)
+        val absent = known.firstOrNull { !File(it).isDirectory }
+        if (absent != null) {
+            throw IllegalStateException("SD 卡书库当前不可用，已暂停写入以保护书库")
+        }
         val configured = ServerConfig.libraryStorageDir?.takeIf { it.isNotBlank() } ?: return
         // 配置目录不在 externalFilesDirs 里（不该发生）→ 交回 selectedLibraryRoot 的既有回退逻辑，不拦
-        val sdRoot = context.getExternalFilesDirs(null)
-            .firstOrNull { it.absolutePath == configured } ?: return
+        val sdRoot = externalRoots.firstOrNull { it.absolutePath == configured } ?: return
         if (!sdRoot.isDirectory) {
             throw IllegalStateException("SD 卡书库当前不可用，已暂停写入以保护书库")
         }

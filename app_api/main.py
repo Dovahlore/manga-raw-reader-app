@@ -94,7 +94,13 @@ _background_tasks: set = set()
 def _spawn_background(coro):
     t = asyncio.create_task(coro)
     _background_tasks.add(t)
-    t.add_done_callback(_background_tasks.discard)
+
+    def _done(task: asyncio.Task):
+        _background_tasks.discard(task)
+        # 修复（V5-低8）：后台任务异常不能无声消失——记日志，否则 job 永远停在 queued/running 无迹可寻
+        if not task.cancelled() and task.exception() is not None:
+            print(f"[app-api] 后台任务异常: {task.exception()!r}", flush=True)
+    t.add_done_callback(_done)
     return t
 
 
@@ -413,6 +419,13 @@ def _is_fatal_translator_error(error: Exception) -> bool:
         "permission denied", "connection error", "name or service not known",
     )
     return any(marker in message for marker in markers)
+
+
+def _job_error_text(e: Exception) -> str:
+    # 修复（04-N2/U4）：致命（配置类）错误加结构码前缀落 jobs.error，App 端判 fatal 认码，
+    # 不再依赖中文文案前缀（文案改动即失效）；展示侧负责剥前缀
+    s = str(e)[:2000]
+    return ("FATAL_CONFIG|" + s)[:2000] if _is_fatal_translator_error(e) else s
 
 
 def _is_connection_error(error: Exception) -> bool:
@@ -925,6 +938,14 @@ async def translate_page(
     png_path = S.CACHE_DIR / f"{cache_key}.png"   # 图片缓存：本地磁盘
     redis_key = _cache_key(owner, img_sha, cfg_hash)  # 结构化结果缓存：Redis
 
+    # 修复 01-中9（落点补全）：multipart 单页翻译也先补最小 books 行——未注册 book_id
+    # 不再撞 jobs 外键 500（与 translate_book_page 同款无操作 upsert，不覆盖已有标题）
+    if book_id:
+        await run_in_threadpool(
+            db.execute,
+            "INSERT INTO books (id, title, order_dir, owner) VALUES (%s,%s,%s,%s) "
+            "ON DUPLICATE KEY UPDATE order_dir=order_dir",
+            (book_id, "未命名", None, owner))
     # ---- 任务登记（sync / async 共用，App 都能拿 job_id 看状态）----
     job_id = str(uuid.uuid4())
     await run_in_threadpool(
@@ -948,7 +969,7 @@ async def translate_page(
         await run_in_threadpool(db.execute,
                                 "UPDATE jobs SET status='failed', finished_at=NOW(), error=%s "
                                 "WHERE id=%s AND status IN ('queued','running')",
-                                (str(e)[:2000], job_id))
+                                (_job_error_text(e), job_id))
         raise
     await run_in_threadpool(db.execute,
                             "UPDATE jobs SET status='done', finished_at=NOW(), attempts=1, page_id=%s "
@@ -978,7 +999,7 @@ async def _run_translate_job(job_id, owner, raw, cfg, real_book_id, real_page_in
         await run_in_threadpool(db.execute,
                                 "UPDATE jobs SET status='failed', finished_at=NOW(), error=%s "
                                 "WHERE id=%s AND status IN ('queued','running')",
-                                (str(e)[:2000], job_id))
+                                (_job_error_text(e), job_id))
 
 
 async def _execute_translate(raw, cfg, owner, real_book_id, real_page_index, order_dir, title,
@@ -1375,12 +1396,21 @@ async def translate_all(
     cfg = deep_merge(S.DEFAULT_CONFIG, overrides)
     _require_client_translator_config(cfg)
 
-    raws: List[bytes] = []
-    for img in images:
-        b = await img.read()
-        if not b:
-            raise HTTPException(400, detail=f"empty image: {img.filename}")
-        raws.append(b)
+    # 修复（04-M4/U3）：整书页图不再驻留内存——逐个 spool 到磁盘，worker 每页现读，
+    # 峰值内存从「整书字节」降到「单页 + 上传缓冲」（4GB 上限只是总量闸，挡不住驻留）
+    tmp_spool = S.CACHE_DIR / "spool" / f"tmp-{uuid.uuid4()}"
+    tmp_spool.mkdir(parents=True, exist_ok=True)
+    spooled = 0
+    try:
+        for img in images:
+            b = await img.read()
+            if not b:
+                raise HTTPException(400, detail=f"empty image: {img.filename}")
+            (tmp_spool / f"{spooled:06d}.bin").write_bytes(b)
+            spooled += 1
+    except BaseException:
+        shutil.rmtree(tmp_spool, ignore_errors=True)
+        raise
 
     if page_indices:
         try:
@@ -1388,8 +1418,8 @@ async def translate_all(
         except Exception as e:      # noqa: BLE001
             raise HTTPException(400, detail=f"page_indices 不是合法 JSON 数组: {e}")
     else:
-        indices = list(range(len(raws)))
-    if len(indices) != len(raws):
+        indices = list(range(spooled))
+    if len(indices) != spooled:
         raise HTTPException(400, detail="page_indices 与 images 数量不一致")
 
     # 登记书元信息（page_count 供书库展示）
@@ -1403,6 +1433,7 @@ async def translate_all(
     # 修复 01-中4：建书 upsert 后复查 owner，并发下他人已注册同 id 则中止，不把页/任务挂进他人书
     owner_row = await run_in_threadpool(db.query_one, "SELECT owner FROM books WHERE id=%s", (book_id,))
     if owner_row and str(owner_row["owner"]) != str(owner):
+        shutil.rmtree(tmp_spool, ignore_errors=True)
         raise RuntimeError(f"book {book_id} belongs to another owner")
 
     # 修复 04-L2：查重+INSERT job 用 GET_LOCK 串行化，防并发双 job；5s 拿不到 → 503
@@ -1414,6 +1445,7 @@ async def translate_all(
             "SELECT id FROM jobs WHERE book_id=%s AND owner=%s AND action='translate_all' "
             "AND status IN ('queued','running') LIMIT 1", (book_id, owner))
         if existing:
+            shutil.rmtree(tmp_spool, ignore_errors=True)
             return {"book_job_id": existing["id"], "status": "queued", "duplicate": True}
 
         # 重翻这些页：把旧 failed 清回 pending，避免书库进度页继续显示上一轮的失败数
@@ -1434,23 +1466,31 @@ async def translate_all(
         await run_in_threadpool(_mark_pending_pages, book_id, owner, indices, order_dir)
     finally:
         await _job_dedup_release(_lk_conn, _lk_key)
+    # spool 落位到 job 目录；此后若入队前异常，retention 清理会兜底
+    spool_dir = S.CACHE_DIR / "spool" / job_id
+    tmp_spool.rename(spool_dir)
     await _whole_book_queue.put(
-        (job_id, lambda: _run_translate_all(job_id, owner, book_id, title, order_dir, cfg, indices, raws, force)))
-    return {"book_job_id": job_id, "status": "queued", "total": len(raws)}
+        (job_id, lambda: _run_translate_all(job_id, owner, book_id, title, order_dir, cfg, indices, spool_dir, force)))
+    return {"book_job_id": job_id, "status": "queued", "total": spooled}
 
 
 def _mark_pending_pages(book_id, owner, indices, order_dir):
     # 修复 04-H2：App 崩溃恢复判定依赖 pending 行，建 job 后先把本轮页落 pending 占位行；
-    # orig_sha1/config_hash 为 CHAR(40) NOT NULL，空串合法。
-    for idx in indices:
+    # orig_sha1/config_hash 为 CHAR(40) NOT NULL，以 ' ' 单空格占位（非空合法）。
+    # 修复（V5-中5）：批量化（500 页/批）——该函数在 GET_LOCK 段内执行，逐页 INSERT
+    # 会让数千页的书持锁数十秒，并发请求 5s 拿不到锁就 503
+    rows = [(book_id, idx, order_dir) for idx in indices]
+    for i in range(0, len(rows), 500):
+        chunk = rows[i:i + 500]
+        values = ",".join(["(%s,%s,%s,'',' ','pending')"] * len(chunk))
         db.execute(
             "INSERT INTO pages (book_id, page_index, order_dir, orig_sha1, config_hash, status) "
-            "VALUES (%s,%s,%s,'',' ','pending') "
+            f"VALUES {values} "
             "ON DUPLICATE KEY UPDATE status=IF(status='done', status, 'pending')",
-            (book_id, idx, order_dir))
+            tuple(x for row in chunk for x in row))
 
 
-async def _run_translate_all(job_id, owner, book_id, title, order_dir, cfg, indices, raws, force) -> None:
+async def _run_translate_all(job_id, owner, book_id, title, order_dir, cfg, indices, spool_dir, force) -> None:
     """后台按顺序翻完整本书：逐页复用 _execute_translate（含 L1 缓存 + 上下文 + 落库）。"""
     await run_in_threadpool(db.execute,
                             "UPDATE jobs SET status='running', started_at=NOW() WHERE id=%s AND status='queued'",
@@ -1461,7 +1501,8 @@ async def _run_translate_all(job_id, owner, book_id, title, order_dir, cfg, indi
     cancelled = False
     consecutive_failed = 0   # 修复 04-M5：连续 3 页失败熔断，中止整本
     try:
-        for idx, raw in zip(indices, raws):
+        for pos, idx in enumerate(indices):
+            raw = (spool_dir / f"{pos:06d}.bin").read_bytes()
             # 书被删（删书/取消同步）就停：否则 _persist_page 会把已删的书又建回来
             exists = await run_in_threadpool(
                 db.query_one, "SELECT id FROM books WHERE id=%s AND owner=%s", (book_id, owner))
@@ -1519,8 +1560,12 @@ async def _run_translate_all(job_id, owner, book_id, title, order_dir, cfg, indi
                                     "WHERE id=%s AND status IN ('queued','running')", (job_id,))
     except Exception as e:      # noqa: BLE001
         await run_in_threadpool(db.execute,
-                                "UPDATE jobs SET status='failed', finished_at=NOW(), error=%s WHERE id=%s",
-                                (str(e)[:2000], job_id))
+                                "UPDATE jobs SET status='failed', finished_at=NOW(), error=%s "
+                                "WHERE id=%s AND status IN ('queued','running')",
+                                (_job_error_text(e), job_id))
+    finally:
+        # 修复（04-M4/U3）：spool 用完即清（取消/失败同样清理）
+        shutil.rmtree(spool_dir, ignore_errors=True)
 
 
 @app.post("/v1/books/{book_id}/translate-from-zip", dependencies=[Depends(auth)])
@@ -1667,8 +1712,9 @@ async def _run_translate_all_from_zip(job_id, owner, book_id, title, order_dir, 
                                     "WHERE id=%s AND status IN ('queued','running')", (job_id,))
     except Exception as e:      # noqa: BLE001
         await run_in_threadpool(db.execute,
-                                "UPDATE jobs SET status='failed', finished_at=NOW(), error=%s WHERE id=%s",
-                                (str(e)[:2000], job_id))
+                                "UPDATE jobs SET status='failed', finished_at=NOW(), error=%s "
+                                "WHERE id=%s AND status IN ('queued','running')",
+                                (_job_error_text(e), job_id))
 
 
 @app.post("/v1/books/{book_id}/pages/{page_index}/translate", dependencies=[Depends(auth)])

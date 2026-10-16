@@ -40,16 +40,22 @@ class TransferClient(
         .writeTimeout(120, TimeUnit.SECONDS)
         .build()
 
-    private val resolveListener = object : NsdManager.ResolveListener {
-        override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {}
-        override fun onServiceResolved(info: NsdServiceInfo) {
-            val host = info.host?.hostAddress ?: return
-            // 发现的是自己：服务方在 TXT 记录里广播了设备 ID
-            if (info.attributes[NSD_KEY_DEVICE_ID]?.toString(Charsets.UTF_8) == ownDeviceId) return
-            if (devices.containsKey(info.serviceName)) return
-            val d = DiscoveredDevice(info.serviceName, host, info.port, info.attributes[NSD_KEY_DEVICE_ID]?.toString(Charsets.UTF_8))
-            devices[info.serviceName] = d
-            mainHandler.post { onDeviceFound(d) }
+    // 修复（02-中3/P3）：每次 resolve 独立 listener——NsdManager 同一时刻只允许一个
+    // resolve 进行中，共享实例的并发 resolve 会冲突丢设备
+    private fun resolveDevice(info: NsdServiceInfo) {
+        runCatching {
+            nsdManager.resolveService(info, object : NsdManager.ResolveListener {
+                override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {}
+                override fun onServiceResolved(info: NsdServiceInfo) {
+                    val host = info.host?.hostAddress ?: return
+                    // 发现的是自己：服务方在 TXT 记录里广播了设备 ID
+                    if (info.attributes[NSD_KEY_DEVICE_ID]?.toString(Charsets.UTF_8) == ownDeviceId) return
+                    if (devices.containsKey(info.serviceName)) return
+                    val d = DiscoveredDevice(info.serviceName, host, info.port, info.attributes[NSD_KEY_DEVICE_ID]?.toString(Charsets.UTF_8))
+                    devices[info.serviceName] = d
+                    mainHandler.post { onDeviceFound(d) }
+                }
+            })
         }
     }
 
@@ -58,7 +64,7 @@ class TransferClient(
         override fun onDiscoveryStopped(serviceType: String) { mainHandler.post { onDiscoveryStopped() } }
         override fun onServiceFound(info: NsdServiceInfo) {
             if (info.serviceType == SERVICE_TYPE) {
-                runCatching { nsdManager.resolveService(info, resolveListener) }
+                resolveDevice(info)
             }
         }
         override fun onServiceLost(info: NsdServiceInfo) { devices.remove(info.serviceName) }
@@ -72,8 +78,22 @@ class TransferClient(
     fun startDiscovery() {
         devices.clear()
         runCatching { if (!multicastLock.isHeld) multicastLock.acquire() }
-        runCatching { nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener) }
-            .onFailure { runCatching { if (multicastLock.isHeld) multicastLock.release() } }
+        // 修复（02-中3/P3）：上轮 stop 未完成会让 discoverServices 抛错——退避 200ms 重试一次，
+        // 仍失败才释放组播锁并通知 UI，避免「发现假死但界面还在转圈」
+        val started = runCatching {
+            nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
+        }.isSuccess
+        if (!started) {
+            mainHandler.postDelayed({
+                val ok = runCatching {
+                    nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
+                }.isSuccess
+                if (!ok) {
+                    runCatching { if (multicastLock.isHeld) multicastLock.release() }
+                    mainHandler.post { onDiscoveryStopped() }
+                }
+            }, 200)
+        }
     }
 
     fun stopDiscovery() {
@@ -93,6 +113,9 @@ class TransferClient(
     ): JSONObject {
         val base = "http://${device.host}:${device.port}"
         val deviceKey = "${device.host}:${device.port}"
+        // 修复（02-低5 瑕疵）：顺带清掉过期的复用表条目，防长期进程缓慢累积
+        val sessionCutoff = System.currentTimeMillis() - 30L * 60 * 1000
+        lastSessionByDevice.entries.removeIf { it.value.second < sessionCutoff }
         onStage("正在建立会话…")
 
         // 修复（05-中5）：30 分钟内对同一 host:port 有未完成会话时，先拿旧 sessionId 对首个文件
@@ -167,8 +190,6 @@ class TransferClient(
         return result
     }
 
-    /** 修复（05-中5）：探测旧会话是否仍有效——GET offset 命中即视为可续传；400/未知会话返回 false。 */
-    /** 修复（05-中5）：探测旧会话是否仍有效——GET offset 命中即视为可续传；400/未知会话返回 false。 */
     /** 修复（05-中5）：探测旧会话是否仍有效——GET offset 命中即视为可续传；400/未知会话返回 false。 */
     private fun probeSessionAlive(base: String, token: String, sessionId: String, relPath: String): Boolean {
         val req = Request.Builder().url("$base/files/$sessionId/$relPath/offset")

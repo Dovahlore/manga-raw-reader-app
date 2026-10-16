@@ -38,7 +38,16 @@ data class DiscoveredDevice(
     val devid: String? = null,
 )
 
-/** 已配对设备：配对一次后，遥控和局域网传书共用这个授权。 */
+/** 一条配对凭据：direction=in 表示对方凭它遥控本机；out 表示本机用它遥控对方。 */
+data class PairedCredential(
+    val token: String,
+    val direction: String,
+    val issuedAt: Long,
+)
+
+/** 已配对设备：配对一次后，遥控和局域网传书共用这个授权。
+ *  修复（02-中10/U2）：凭据改多凭据列表——双向/重复配对各自追加，不再互相覆盖；
+ *  token 字段保留为「最新凭据」便捷访问（=credentials 中 issuedAt 最新者）。 */
 data class PairedDevice(
     val deviceId: String,
     val name: String,
@@ -46,6 +55,7 @@ data class PairedDevice(
     val port: Int,
     val token: String,
     val lastConnectedAt: Long,
+    val credentials: List<PairedCredential> = emptyList(),
 )
 
 data class RemotePairResult(

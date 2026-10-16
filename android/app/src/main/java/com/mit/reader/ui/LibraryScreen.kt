@@ -844,6 +844,23 @@ fun LibraryScreen(
                 // 底部左右两枚同款按钮：左=遥控器，右=导入（同为 48dp 圆形 + secondaryContainer，
                 // 距左右/底部边距一致，连接状态只影响遥控器按钮配色，不影响两侧对称）。
                 var importMenuOpen by remember { mutableStateOf(false) }
+                // 修复（03-低12/P7）：遥控器页之外的「遥控中」可见徽标——点击进遥控器页可断开
+                if (app.remoteControllerConnection != null) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(start = 16.dp, bottom = 74.dp)
+                            .background(MaterialTheme.colorScheme.primaryContainer, CircleShape)
+                            .clickable { onRemoteControl() }
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                    ) {
+                        Text(
+                            "遥控中",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                }
                 IconButton(
                     onClick = onRemoteControl,
                     modifier = Modifier
