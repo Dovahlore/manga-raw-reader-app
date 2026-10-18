@@ -72,13 +72,20 @@ private fun postControlledNotification(context: Context, controllerName: String)
         context, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
     )
     val notification = Notification.Builder(context, CONTROL_CHANNEL_ID)
-        .setSmallIcon(context.applicationInfo.icon)
+        // 修复（真机崩溃，华为/小米均复现）：applicationInfo.icon 在清单未配 android:icon 时为 0，
+        // setSmallIcon(0) 抛 IllegalArgumentException——模拟器因未授通知权限提前返回而未暴露。
+        // 改用专用矢量小图标，且通知发送失败绝不拖垮 App。
+        .setSmallIcon(com.mit.reader.R.drawable.ic_stat_remote)
         .setContentTitle("正在被「$controllerName」遥控")
         .setContentText("对方可翻页。阅读器底栏可退出被遥控")
         .setOngoing(true)
         .setContentIntent(pi)
         .build()
-    androidx.core.app.NotificationManagerCompat.from(context).notify(CONTROL_NOTIFY_ID, notification)
+    runCatching {
+        androidx.core.app.NotificationManagerCompat.from(context).notify(CONTROL_NOTIFY_ID, notification)
+    }.onFailure {
+        android.util.Log.w("RemoteControlConsent", "被控状态通知发送失败: ${it.message}")
+    }
 }
 
 private fun cancelControlledNotification(context: Context) {

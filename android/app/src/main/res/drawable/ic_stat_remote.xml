@@ -1,0 +1,10 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- 通知小图标：双三角「快进/翻页」剪影（通知图标只用 alpha 通道，白色填充） -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M4.5,5.5 L11.5,12 L4.5,18.5 Z M12.5,5.5 L19.5,12 L12.5,18.5 Z" />
+</vector>

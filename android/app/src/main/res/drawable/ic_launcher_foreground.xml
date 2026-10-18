@@ -1,0 +1,10 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 启动图标前景：双三角翻页符号，居中于 66dp 安全区 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M31,39 L52,54 L31,69 Z M56,39 L77,54 L56,69 Z" />
+</vector>

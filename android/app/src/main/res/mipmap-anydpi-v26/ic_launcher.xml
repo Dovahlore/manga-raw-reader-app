@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 修复：清单从未配置 android:icon（applicationInfo.icon=0 的根源）。
+         minSdk=26，自适应图标 XML 即可，无需任何传统 PNG。 -->
+    <background android:drawable="@color/launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>
