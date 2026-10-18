@@ -31,7 +31,18 @@ object RemoteControlUi {
 
     // 修复（03-中7）：接受态以稳定 id 跟踪，同名设备不再串态
     var acceptedControllerId by mutableStateOf<String?>(null)
+
+    // 修复（2026-10-18）：弹窗与拒绝冷却从 Composable remember 迁到进程级——平板分屏/旋转
+    // 等导致 Activity 重建时 remember 全部清零，会出现「弹窗丢失但会话仍在」的死区
+    //（控制端被永久压制且无法再接受）。manager 会话状态在 Application 级存活，
+    // 弹窗状态必须同样进程级。
+    var pendingRequest by mutableStateOf<ConsentRequest?>(null)
+    val deniedAtById = mutableStateMapOf<String, Long>()
+    val deniedAtByName = mutableStateMapOf<String, Long>()
 }
+
+/** 弹窗请求（挂到进程级 RemoteControlUi，避免 Activity 重建丢失）。 */
+data class ConsentRequest(val controllerName: String, val at: Long)
 
 /**
  * 弹窗确认式被控模型（v48 起，替代「允许其他设备遥控本机」开关）：
@@ -48,8 +59,8 @@ private const val CONTROL_NOTIFY_ID = 4701
 /** 配对回弹（对方配对成功后几秒内即停心跳）与真实遥控请求（心跳持续）的分界。 */
 private const val CONTROL_REQUEST_SURVIVE_MS = 8_000L
 
-/** 拒绝后拦截同一设备自动重连的时长。 */
-private const val DENY_COOLDOWN_MS = 60_000L
+/** 拒绝后拦截同一设备自动重连的时长（2026-10-18 60→15 秒：弹窗确认才是真防线，冷却只需退自动重连）。 */
+private const val DENY_COOLDOWN_MS = 15_000L
 
 private fun ensureControlChannel(context: Context) {
     val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -92,15 +103,15 @@ private fun cancelControlledNotification(context: Context) {
     androidx.core.app.NotificationManagerCompat.from(context).cancel(CONTROL_NOTIFY_ID)
 }
 
-private data class ConsentRequest(val controllerName: String, val at: Long)
+/** 弹窗请求定义已上移为顶层（进程级状态引用）。 */
 
 @Composable
 fun RemoteControlConsentHost(app: ReaderApp) {
     val context = LocalContext.current
-    var pending by remember { mutableStateOf<ConsentRequest?>(null) }
-    val deniedAtByName = remember { mutableStateMapOf<String, Long>() }
-    // 修复（02-中8/03-中7）：拒绝冷却同步记 id，判定优先 id，名字仅作兜底
-    val deniedAtById = remember { mutableStateMapOf<String, Long>() }
+    // 修复（2026-10-18）：弹窗/拒绝冷却改用进程级状态（见 RemoteControlUi 注释）
+    val pending = RemoteControlUi.pendingRequest
+    val deniedAtByName = RemoteControlUi.deniedAtByName
+    val deniedAtById = RemoteControlUi.deniedAtById
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -140,7 +151,7 @@ fun RemoteControlConsentHost(app: ReaderApp) {
             }
             RemoteControlUi.acceptedControllerId = null
             RemoteControlUi.acceptedControllerName = null
-            pending = null
+            RemoteControlUi.pendingRequest = null
             // 修复（03-高2 残留）：会话结束立即收回远端翻页能力，不再依赖下一轮 500ms 压制
             app.remoteControl.clearReaderInteractionAllowed()
         } else if (RemoteControlUi.acceptedControllerId != app.remoteControl.currentControllerId() &&
@@ -154,7 +165,7 @@ fun RemoteControlConsentHost(app: ReaderApp) {
                 app.disconnectRemoteHostController()
             } else if (app.remoteControl.sessionIntent == "control" && app.remoteControl.controlBeats >= 2) {
                 // 协议级：对端明确声明遥控意图且连续两次心跳——立即弹窗，不再等 8 秒
-                pending = ConsentRequest(name, System.currentTimeMillis())
+                RemoteControlUi.pendingRequest = ConsentRequest(name, System.currentTimeMillis())
             } else if (app.remoteControl.sessionIntent == null) {
                 // 旧版对端（心跳无 intent 字段）：维持 8 秒存活启发式
                 delay(CONTROL_REQUEST_SURVIVE_MS)
@@ -163,7 +174,7 @@ fun RemoteControlConsentHost(app: ReaderApp) {
                     app.remoteControl.currentControllerId() == controllerId &&
                     RemoteControlUi.acceptedControllerId != controllerId
                 ) {
-                    pending = ConsentRequest(name, System.currentTimeMillis())
+                    RemoteControlUi.pendingRequest = ConsentRequest(name, System.currentTimeMillis())
                 }
             }
             // intent=="probe"/"pair"：探活/配对回弹，不弹窗
@@ -198,7 +209,7 @@ fun RemoteControlConsentHost(app: ReaderApp) {
             text = { Text("「${request.controllerName}」请求遥控本机。接受后对方可翻页，直到任一方断开。") },
             confirmButton = {
                 TextButton(onClick = {
-                    pending = null
+                    RemoteControlUi.pendingRequest = null
                     // 修复（03-中7）：接受态写入 manager 当前连入控制器的稳定 id，名字仅展示
                     RemoteControlUi.acceptedControllerId = app.remoteControl.currentControllerId()
                     RemoteControlUi.acceptedControllerName = request.controllerName
@@ -211,7 +222,7 @@ fun RemoteControlConsentHost(app: ReaderApp) {
             },
             dismissButton = {
                 TextButton(onClick = {
-                    pending = null
+                    RemoteControlUi.pendingRequest = null
                     // 修复（02-中8/03-中7）：冷却写入点同步记 id，判定优先 id
                     app.remoteControl.currentControllerId()?.let {
                         deniedAtById[it] = System.currentTimeMillis()

@@ -326,8 +326,10 @@ class RemoteControlManager(
     fun disconnectController() {
         synchronized(lock) {
             // 修复（03-中4）：连 id 一起清，避免旧设备「永久占坑」卡死后续配对；
-            // 修复（03-高1/02-中7）：断开即对该设备挂 60 秒冷却，凭已保存授权的心跳也会被拒
-            connectedControllerId?.let { suspendedUntil[it] = System.currentTimeMillis() + 60_000 }
+            // 修复（03-高1/02-中7 → 2026-10-18 调优）：断开即对该设备挂短冷却，凭已保存授权的心跳也会被拒。
+            // 60 秒过激（真机反馈：被控端「退出被遥控」后想马上重新遥控被卡住一分钟）——
+            // 每次会话本来就要弹窗确认，弹窗即防线；冷却只需吞掉断开瞬间的自动重连冲击，8 秒足够
+            connectedControllerId?.let { suspendedUntil[it] = System.currentTimeMillis() + 8_000 }
             acceptedControllerId = null
             pairingToken = ""
             connectedControllerName = null
