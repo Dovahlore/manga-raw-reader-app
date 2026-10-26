@@ -175,3 +175,36 @@ CREATE TABLE IF NOT EXISTS reading_progress (
   -- 进度挂在「同 owner+hash 的书」上：书删了进度跟着删（books 有 uniq_owner_hash(owner,hash)）
   CONSTRAINT fk_readingprogress_book FOREIGN KEY (owner, hash) REFERENCES books (owner, hash) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============================================================
+-- Crash 上报（App 端 uncaught exception 技术栈；只含技术信息，不含书名/内容）
+-- 同签名由客户端 24h 去重；服务端 90 天清理（main._cleanup_expired_once）。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS crash_reports (
+  id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+  owner           VARCHAR(191) NOT NULL DEFAULT 'default',  -- 上报账号（=users.id）
+  version_code    BIGINT      NOT NULL DEFAULT 0,
+  version_name    VARCHAR(64) NOT NULL DEFAULT '',
+  device          VARCHAR(191) NULL,
+  android_version VARCHAR(64) NULL,
+  thread          VARCHAR(128) NULL,
+  signature       CHAR(16)    NULL,          -- 异常签名（类名+顶层栈帧 sha256 前 16）
+  stack           MEDIUMTEXT  NULL,
+  crashed_at      BIGINT      NULL,          -- 客户端毫秒时间戳
+  created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_crash_owner (owner),
+  KEY idx_crash_created (created_at),
+  KEY idx_crash_sig (signature)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============================================================
+-- 按书人名术语表：翻译管线每翻满 10 页自动提取（src=原文, dst=译文），
+-- 注入后续页翻译请求的 context_text 前缀，保证全书人名/专名译法一致。
+-- 一卷一个文件导入 = 一个 book_id，按书存即按卷；书删了跟着删。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS book_glossaries (
+  book_id     VARCHAR(191) PRIMARY KEY,
+  terms_json  JSON         NULL,          -- [{"src":"...","dst":"..."}]（上限 60 条）
+  updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_bookglossary_book FOREIGN KEY (book_id) REFERENCES books (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

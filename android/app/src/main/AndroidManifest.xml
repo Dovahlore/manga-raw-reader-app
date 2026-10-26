@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- 访问后端（局域网/公网）需要网络权限 -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -11,6 +12,10 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <!-- 被遥控时的常驻通知（Android 13+ 需运行时申请） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 单页导出：Android 9 及以下直写公共 Download 目录需要（10+ 走 MediaStore 免权限） -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <application
         android:name=".ReaderApp"
@@ -30,8 +35,10 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- 用外部程序「打开」epub / mobi / 漫画压缩包 → 出现在应用选择列表，选中后导入并进阅读器 -->
-            <intent-filter>
+            <!-- 用外部程序「打开」epub / mobi / 漫画压缩包 → 出现在应用选择列表，选中后导入并进阅读器。
+                 本 filter 只声明 mimeType（外部文件管理器常常只给 mime 不给路径），mimeType-only 的 VIEW
+                 filter 没有 URL 可验证属预期形态，故抑制 AppLinkUrlError。 -->
+            <intent-filter tools:ignore="AppLinkUrlError">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />

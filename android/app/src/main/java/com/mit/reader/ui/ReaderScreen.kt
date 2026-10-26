@@ -1,7 +1,12 @@
 package com.mit.reader.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.SystemClock
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -74,14 +79,17 @@ import coil.request.ImageRequest
 import com.mit.reader.PageStatus
 import com.mit.reader.ReaderApp
 import com.mit.reader.ReaderViewModel
+import com.mit.reader.data.PageExporter
 import com.mit.reader.data.ReadingMode
 import com.mit.reader.data.RemotePageAction
 import com.mit.reader.data.RemoteReaderSnapshot
 import com.mit.reader.data.RemoteReaderCommandHandler
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private const val MAX_ZOOM = 5f
 private const val DOUBLE_TAP_ZOOM = 2.5f
@@ -179,6 +187,58 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
             page = pagerState.currentPage,
             pageCount = book.pageCount,
         )
+    }
+
+    // ── 单页导出（Download/MITReader/，相册可见）──────────────────────────────
+    var exportDialogOpen by remember { mutableStateOf(false) }
+    var pendingExportTranslated by remember { mutableStateOf<Boolean?>(null) }
+
+    fun runExport(translated: Boolean) {
+        val src = if (translated) vm.pageStates[vm.currentPage]?.translatedFile
+        else book.pageFiles.getOrNull(vm.currentPage)
+        if (src == null || !src.exists()) {
+            Toast.makeText(app, if (translated) "该页还没有译文" else "找不到原页文件", Toast.LENGTH_SHORT).show()
+            return
+        }
+        exportDialogOpen = false
+        val page = vm.currentPage
+        val title = book.title
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { PageExporter.exportPage(app, src, title, page, translated) }
+            }
+            Toast.makeText(
+                app,
+                result.fold(
+                    { name -> "已导出到 Download/MITReader/：$name" },
+                    { e -> "导出失败：${e.message ?: "未知错误"}" },
+                ),
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+
+    // Android 9 及以下写公共 Download 需要运行时存储权限；授权后继续被挂起的导出请求
+    val exportPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        val wanted = pendingExportTranslated
+        pendingExportTranslated = null
+        if (granted && wanted != null) runExport(wanted)
+        else if (!granted) Toast.makeText(app, "没有存储权限，无法保存到 Download", Toast.LENGTH_LONG).show()
+    }
+
+    fun requestExport(translated: Boolean) {
+        if (Build.VERSION.SDK_INT >= 29) {
+            runExport(translated)
+            return
+        }
+        val granted = app.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+            PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            runExport(translated)
+        } else {
+            pendingExportTranslated = translated
+            exportPermLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
     }
 
     val st = vm.pageStates[vm.currentPage]
@@ -286,6 +346,9 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                         color = Color.White,
                         style = MaterialTheme.typography.labelMedium,
                     )
+                }
+                TextButton(onClick = { keepUiAlive(); exportDialogOpen = true }) {
+                    Text("导出", color = Color.White, style = MaterialTheme.typography.labelMedium)
                 }
             }
 
@@ -416,6 +479,41 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                 )
             }
         }
+    }
+
+    // 单页导出弹窗：译文未完成时禁用译文项
+    if (exportDialogOpen) {
+        val hasTranslation = vm.pageStates[vm.currentPage]?.translatedFile
+            ?.let { it.exists() && it.length() > 0L } == true
+        AlertDialog(
+            onDismissRequest = { exportDialogOpen = false },
+            title = { Text("导出第 ${vm.currentPage + 1} 页") },
+            text = {
+                Column {
+                    Text(
+                        "保存到 Download/MITReader/，相册与文件管理器可见。",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.size(12.dp))
+                    TextButton(
+                        onClick = { requestExport(true) },
+                        enabled = hasTranslation,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(if (hasTranslation) "导出译文页" else "导出译文页（尚未翻译）")
+                    }
+                    TextButton(
+                        onClick = { requestExport(false) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("导出原图")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { exportDialogOpen = false }) { Text("关闭") }
+            },
+        )
     }
 
     if (remoteDialogOpen) {

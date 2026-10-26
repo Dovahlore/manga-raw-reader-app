@@ -65,6 +65,8 @@ private data class PendingDownload(
     val cookie: String?,
     val referer: String?,
     val userAgent: String?,
+    val mimeType: String? = null,
+    val contentLength: Long = -1L,
 )
 
 /** 内嵌 WebView 快速访问站点：只允许下载 epub/mobi；先确认再后台下载（进度页看进度）；退出重进恢复上次页面。 */
@@ -147,7 +149,7 @@ fun KmoeScreen(onBack: () -> Unit) {
                     }
 
                     // 拦截下载：epub/mobi/漫画压缩包一视同仁；先查重 + 弹确认，确认后进后台队列
-                    setDownloadListener { url, userAgent, contentDisposition, _, _ ->
+                    setDownloadListener { url, userAgent, contentDisposition, mimeType, contentLength ->
                         val name = decodeFileName(
                             url.substringAfterLast('/').substringBefore('?')
                                 .ifBlank { "download_${System.currentTimeMillis()}" },
@@ -165,6 +167,8 @@ fun KmoeScreen(onBack: () -> Unit) {
                             cookie,
                             referer,
                             userAgent,
+                            mimeType,
+                            contentLength,
                         )
                     }
 
@@ -177,13 +181,23 @@ fun KmoeScreen(onBack: () -> Unit) {
 
     // 下载确认弹窗：确认后转后台下载，进度在「进度」页查看
     pendingDownload?.let { p ->
+        // 小文件闸门：Kmoe 上小于 50MB 的常是订阅版/邮箱版预览文件——只提示不拦截（size 未知时不提示）
+        val smallFile = p.contentLength in 1L until 50L * 1024 * 1024
         AlertDialog(
             onDismissRequest = { pendingDownload = null },
             title = { Text("确认下载") },
-            text = { Text("下载《${p.title}》到书库？\n下载在后台进行，进度可在「进度」页查看。") },
+            text = {
+                Text(
+                    "下载《${p.title}》到书库？\n下载在后台进行，进度可在「进度」页查看。" +
+                        if (smallFile) {
+                            "\n\n⚠️ 该文件约 ${"%.1f".format(p.contentLength / 1024.0 / 1024.0)} MB（<50MB），" +
+                                "可能是订阅版/邮箱版小文件；完整版或 EPUB 通常更大，建议回网页选大文件。"
+                        } else "",
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
-                    app.enqueueDownload(p.url, p.name, p.cookie, p.referer, p.userAgent)
+                    app.enqueueDownload(p.url, p.name, p.cookie, p.referer, p.userAgent, p.mimeType)
                     Toast.makeText(context, "已开始后台下载：${p.name}", Toast.LENGTH_SHORT).show()
                     pendingDownload = null
                 }) { Text("下载") }

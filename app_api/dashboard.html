@@ -114,7 +114,7 @@ tokenInput.oninput = () => localStorage.setItem('mit_token', tokenInput.value);
 tokenInput.onkeydown = (e) => { if (e.key === 'Enter') login(); };
 
 const S = { isAdmin: false, tab: 0, data: {}, jobsTimer: null };
-const ADMIN_TABS = ['概览', '用户', '书籍', '任务', '版本'];
+const ADMIN_TABS = ['概览', '用户', '书籍', '任务', '版本', '崩溃'];
 const USER_TABS = ['我的数据'];
 
 // ---------------- 分页状态（每页条数可调） ----------------
@@ -251,6 +251,7 @@ function switchTab(i) {
     if (i === 2) loadBooks();
     if (i === 3) { loadJobs(); S.jobsTimer = setInterval(() => { if (document.getElementById('autoJobs').checked) loadJobs(); }, 8000); }
     if (i === 4) loadReleases();
+    if (i === 5) loadCrashes();
   } else loadMine();
 }
 
@@ -432,6 +433,7 @@ function renderBooks(filter) {
       <td class="mono">${b.size ? fmtBytes(b.size) : '-'}</td>
       <td class="actions">
         ${b.failed_pages ? `<button class="btn sm ghost" onclick="showFailed('${bid}')">失败页</button>` : ''}
+        <button class="btn sm ghost" onclick="showGlossary('${bid}')">术语表</button>
         <button class="btn sm danger" onclick="deleteBook('${bid}')">删除</button>
       </td></tr>`;
   }));
@@ -591,6 +593,63 @@ async function previewUpdate() {
   const out = document.getElementById('prevOut');
   try { const r = await api(`/v1/admin/update-preview?version_code=${code}`); out.style.display = 'block'; out.textContent = JSON.stringify(r, null, 2); }
   catch (e) { out.style.display = 'block'; out.textContent = '出错：' + e.message; }
+}
+
+// ---------------- Tab 5：崩溃 ----------------
+async function loadCrashes() {
+  const root = document.getElementById('root');
+  let d;
+  try { d = await api('/v1/admin/crashes?limit=200'); } catch (e) { root.innerHTML = `<div class="err">加载失败：${esc(e.message)}</div>`; return; }
+  S.data.crashes = d.crashes || [];
+  const st = d.stats || {};
+  let html = `<div class="toolbar">
+      <span class="hint">App 端崩溃上报（技术栈，不含书名/内容）；同签名客户端 24h 去重</span>
+      <button class="btn sm ghost" onclick="loadCrashes()">刷新</button>
+    </div>`;
+  html += `<div class="cards">
+      ${card('累计崩溃', fmtTok(st.total))}
+      ${card('独立签名', fmtTok(st.kinds))}
+      ${card('近 24 小时', fmtTok(st.last_24h))}
+    </div>`;
+  const rows = S.data.crashes;
+  html += `<h3>最近上报（${rows.length}）</h3>` + table(['时间', '版本', '设备', '系统', '线程', '签名', '上报者', '操作'], rows.map(c =>
+    `<tr>
+      <td class="mono">${String(c.created_at||'').slice(0,19)}</td>
+      <td class="mono">${esc(c.version_name||'')} (${c.version_code||0})</td>
+      <td>${esc(c.device||'-')}</td>
+      <td>${esc(c.android_version||'-')}</td>
+      <td class="mono">${esc(c.thread||'-')}</td>
+      <td class="mono">${esc(c.signature||'-')}</td>
+      <td class="mono">${esc(c.owner_name ? (c.owner_name + ' #' + c.owner) : ('#' + c.owner))}</td>
+      <td><button class="btn sm ghost" onclick="showCrash(${c.id})">栈</button></td>
+    </tr>`));
+  html += `<div id="crashPanel"></div>`;
+  root.innerHTML = `<div id="tab5">${html}</div>`;
+  mountHiddenTabs();
+}
+
+function showCrash(id) {
+  const c = (S.data.crashes || []).find(x => x.id === id);
+  if (!c) return;
+  const panel = document.getElementById('crashPanel');
+  panel.innerHTML = `<div class="panel"><b>崩溃详情 · ${esc(c.signature || '')}</b>
+    <span class="hint" style="margin-left:10px">${esc(c.version_name||'')} (${c.version_code||0}) · ${esc(c.device||'')} · ${esc(c.android_version||'')}</span>
+    <pre>${esc(c.stack || '')}</pre></div>`;
+  panel.scrollIntoView({ behavior: 'smooth' });
+}
+
+async function showGlossary(bid) {
+  const panel = document.getElementById('failedPanel');
+  panel.innerHTML = '<div class="hint">加载术语表…</div>';
+  let d;
+  try { d = await api(`/v1/admin/books/${bid}/glossary`); } catch (e) { panel.innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  const b = (S.data.books || []).find(x => x.id === bid);
+  const terms = d.terms || [];
+  panel.innerHTML = `<div class="panel"><b>自动术语表：${esc((b && b.title) || bid)}</b>
+    <span class="hint" style="margin-left:10px">${terms.length} 条 · 更新于 ${String(d.updated_at||'').slice(0,16) || '-'} · 每翻 10 页自动提取，注入后续页翻译</span>
+    ${terms.length ? table(['原文', '译文'], terms.map(t =>
+      `<tr><td>${esc(t.src)}</td><td>${esc(t.dst)}</td></tr>`)) : '<div class="hint" style="margin-top:8px">（还没有术语表：翻满 10 页后自动生成）</div>'}
+  </div>`;
 }
 
 // ---------------- 普通用户只读视图 ----------------

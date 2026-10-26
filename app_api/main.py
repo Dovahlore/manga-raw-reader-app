@@ -247,6 +247,9 @@ async def _cleanup_expired_once() -> None:
     await run_in_threadpool(db.execute,
                             "DELETE FROM jobs WHERE status IN ('done','failed') "
                             "AND finished_at < NOW() - INTERVAL %s DAY", (days,))
+    # 崩溃报告独立保留 90 天（不随翻译数据的保留期走）
+    await run_in_threadpool(db.execute,
+                            "DELETE FROM crash_reports WHERE created_at < NOW() - INTERVAL 90 DAY")
     n_files = await _cleanup_cache_files(days)
     if rows or n_files:
         print(f"[app-api] 保留期清理：删 {len(rows)} 页结果、{n_files} 个缓存图片（>{days} 天）", flush=True)
@@ -389,6 +392,159 @@ def book_context_from_db(book_id: str, page_index: int, pages: int) -> str:
     )
     items = [{"page_index": r["page_index"], "dst": r["dst_text"]} for r in reversed(rows)]
     return build_context_text(items)
+
+
+# ================================================================ 按书人名术语表
+# 一卷一个文件导入 = 一个 book_id，按书存即按卷。翻译时把术语表作为 context_text 的
+# 前缀注入（context_text 在 CACHE_IGNORED_KEYS 里不参与缓存键，术语表更新不会作废缓存）。
+GLOSSARY_MAX_TERMS = 60
+GLOSSARY_EXTRACT_EVERY_PAGES = 10      # 每翻满 N 页自动提取一次
+GLOSSARY_EXTRACT_MAX_PAGES = 12        # 提取时最多回看的页数
+GLOSSARY_EXTRACT_MAX_CHARS = 14000     # 提取 prompt 的正文上限（字符）
+_glossary_extracting: set = set()      # 正在提取的 book_id（防重复触发）
+
+
+def _glossary_prefix(book_id: str) -> str:
+    """术语表 → 注入 context_text 的前缀文本（无术语返回空串）。"""
+    try:
+        row = db.query_one("SELECT terms_json FROM book_glossaries WHERE book_id=%s", (book_id,))
+    except Exception:      # noqa: BLE001
+        return ""
+    if not row or not row.get("terms_json"):
+        return ""
+    try:
+        terms = json.loads(row["terms_json"])
+    except Exception:      # noqa: BLE001
+        return ""
+    lines = []
+    for t in terms if isinstance(terms, list) else []:
+        if not isinstance(t, dict):
+            continue
+        src, dst = str(t.get("src") or "").strip(), str(t.get("dst") or "").strip()
+        if src and dst:
+            lines.append(f"{src}\t{dst}")
+    if not lines:
+        return ""
+    return ("Glossary of character names and proper nouns for this book "
+            "(translate them consistently as given):\n" + "\n".join(lines) + "\n\n")
+
+
+def _apply_glossary(cfg: dict, book_id: Optional[str]) -> None:
+    """把术语表前缀拼到 cfg["context_text"] 头部（页上下文之前）。临时书（_adhoc_）跳过。"""
+    if not book_id or str(book_id).startswith("_adhoc_"):
+        return
+    prefix = _glossary_prefix(book_id)
+    if prefix:
+        cfg["context_text"] = prefix + (cfg.get("context_text") or "")
+
+
+def _spawn_glossary_extract(owner: str, book_id: str, cfg: dict) -> None:
+    """翻译完成后低频触发后台提取；借用本次翻译的模型凭据，失败静默，绝不影响翻译链路。"""
+    if str(book_id).startswith("_adhoc_") or book_id in _glossary_extracting:
+        return
+    translator = cfg.get("translator") or {}
+    api_base = str(translator.get("api_base") or "").strip()
+    api_key = str(translator.get("api_key") or "").strip()
+    model = str(translator.get("model") or "").strip()
+    if not (api_base and api_key and model):
+        return
+    _glossary_extracting.add(book_id)
+
+    async def _run():
+        try:
+            await asyncio.sleep(2.0)   # 等本页 page_context 落库
+            await _extract_glossary(owner, book_id, api_base, api_key, model)
+        except Exception as e:      # noqa: BLE001
+            print(f"[app-api] 术语表提取失败 {book_id}: {type(e).__name__}: {e}", flush=True)
+        finally:
+            _glossary_extracting.discard(book_id)
+
+    asyncio.create_task(_run())
+
+
+async def _extract_glossary(owner: str, book_id: str, api_base: str, api_key: str, model: str) -> None:
+    rows = await run_in_threadpool(
+        db.query,
+        "SELECT page_index, src_text, dst_text FROM page_context WHERE book_id=%s "
+        "ORDER BY page_index DESC LIMIT %s",
+        (book_id, GLOSSARY_EXTRACT_MAX_PAGES))
+    sections, total = [], 0
+    for r in reversed(rows or []):
+        src = (r.get("src_text") or "").strip()
+        dst = (r.get("dst_text") or "").strip()
+        if not src and not dst:
+            continue
+        sec = f"[page {r['page_index'] + 1}]\n原文: {src}\n译文: {dst}"
+        if total + len(sec) > GLOSSARY_EXTRACT_MAX_CHARS:
+            break
+        total += len(sec)
+        sections.append(sec)
+    if len(sections) < 3:
+        return   # 内容太少，提取没有意义
+    existing: Dict[str, str] = {}
+    row = await run_in_threadpool(
+        db.query_one, "SELECT terms_json FROM book_glossaries WHERE book_id=%s", (book_id,))
+    if row and row.get("terms_json"):
+        try:
+            for t in json.loads(row["terms_json"]):
+                if isinstance(t, dict) and t.get("src"):
+                    existing[str(t["src"])] = str(t.get("dst") or "")
+        except Exception:      # noqa: BLE001
+            pass
+
+    system = (
+        "你是漫画翻译的术语审校。下面是一本漫画若干页的「原文/译文」对照。"
+        "请提取其中稳定出现的人名、地名、组织、招式等专有名词的固定译法。"
+        '只输出 JSON 数组，格式：[{"src":"原文","dst":"译文"}]，'
+        f"最多 {GLOSSARY_MAX_TERMS} 条，按重要性排序；没有把握的不要输出。不要输出任何其他文字。"
+    )
+    url = api_base.rstrip("/")
+    if not url.endswith("/chat/completions"):
+        if not url.endswith("/v1"):
+            url += "/v1"
+        url += "/chat/completions"
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
+        r = await client.post(
+            url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"model": model, "temperature": 0,
+                  "messages": [{"role": "system", "content": system},
+                               {"role": "user", "content": "\n\n".join(sections)}]})
+    if r.status_code != 200:
+        raise RuntimeError(f"LLM {r.status_code}: {r.text[:200]}")
+    content = str(((r.json().get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+    if content.startswith("```"):
+        content = content.strip("`").strip()
+        if content.startswith("json"):
+            content = content[4:].strip()
+    try:
+        parsed = json.loads(content)
+    except Exception:      # noqa: BLE001
+        m = re.search(r"\[.*\]", content, re.S)
+        parsed = json.loads(m.group(0)) if m else []
+    if not isinstance(parsed, list):
+        return
+    merged = dict(existing)
+    order = list(existing.keys())
+    for t in parsed:
+        if not isinstance(t, dict):
+            continue
+        src = str(t.get("src") or "").strip()
+        dst = str(t.get("dst") or "").strip()
+        if not src or not dst or len(src) > 64 or len(dst) > 64:
+            continue
+        if src not in merged:
+            order.append(src)
+        merged[src] = dst
+    terms = [{"src": s, "dst": merged[s]} for s in order[-GLOSSARY_MAX_TERMS:]]
+    if not terms:
+        return
+    await run_in_threadpool(
+        db.execute,
+        "INSERT INTO book_glossaries (book_id, terms_json) VALUES (%s,%s) "
+        "ON DUPLICATE KEY UPDATE terms_json=VALUES(terms_json)",
+        (book_id, json.dumps(terms, ensure_ascii=False)))
+    print(f"[app-api] 术语表已更新 {book_id}: {len(terms)} 条", flush=True)
 
 
 def public_config(cfg: dict) -> dict:
@@ -1169,6 +1325,81 @@ async def dashboard_page():
     return HTMLResponse(html)
 
 
+# ================================================================ Crash 上报
+MAX_CRASH_BODY_BYTES = 64 * 1024   # App 端栈截断 32KB + 元数据，留余量
+
+
+@app.post("/v1/crashes", dependencies=[Depends(auth)])
+async def report_crash(request: Request, owner: str = Depends(get_owner)):
+    """App 端崩溃上报：只收技术栈信息（版本/机型/系统/线程/栈），不含书名与阅读内容。"""
+    _check_content_length(request, MAX_CRASH_BODY_BYTES, "crash")
+    try:
+        body = await request.json()
+    except Exception:      # noqa: BLE001
+        raise HTTPException(400, detail="crash payload 不是合法 JSON")
+    if not isinstance(body, dict) or not str(body.get("stack") or "").strip():
+        raise HTTPException(400, detail="crash payload 缺少 stack")
+
+    # 兜底限流：App 端已按签名 24h 去重，这里防异常风暴挤占连接池
+    recent = await run_in_threadpool(
+        db.query_one,
+        "SELECT COUNT(*) AS n FROM crash_reports WHERE owner=%s AND created_at >= NOW() - INTERVAL 1 DAY",
+        (owner,))
+    if recent and recent["n"] >= 50:
+        raise HTTPException(429, detail="crash 上报过于频繁，已限流")
+
+    def _ins():
+        return db.execute(
+            "INSERT INTO crash_reports (owner, version_code, version_name, device, android_version, "
+            "thread, signature, stack, crashed_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (owner,
+             int(body.get("version_code") or 0),
+             str(body.get("version_name") or "")[:64],
+             str(body.get("device") or "")[:191],
+             str(body.get("android_version") or "")[:64],
+             str(body.get("thread") or "")[:128],
+             str(body.get("signature") or "")[:16],
+             str(body.get("stack") or "")[:65535],
+             int(body.get("crashed_at") or 0) or None))
+
+    await run_in_threadpool(_ins)
+    return {"ok": True}
+
+
+@app.get("/v1/admin/crashes")
+async def admin_crashes(limit: int = 200, admin: str = Depends(require_admin)):
+    """崩溃列表 + 聚合统计（管理台「崩溃」页）。"""
+    limit = max(1, min(int(limit), 500))
+    rows = await run_in_threadpool(
+        db.query,
+        "SELECT c.id, c.owner, c.version_code, c.version_name, c.device, c.android_version, "
+        "c.thread, c.signature, c.stack, c.crashed_at, c.created_at, u.name AS owner_name "
+        "FROM crash_reports c LEFT JOIN users u ON u.id=c.owner "
+        "ORDER BY c.created_at DESC, c.id DESC LIMIT %s", (limit,))
+    stats = await run_in_threadpool(
+        db.query_one,
+        "SELECT COUNT(*) AS total, COUNT(DISTINCT signature) AS kinds, "
+        "(SELECT COUNT(*) FROM crash_reports WHERE created_at >= NOW() - INTERVAL 1 DAY) AS last_24h "
+        "FROM crash_reports")
+    return {"crashes": rows, "stats": stats or {}}
+
+
+@app.get("/v1/admin/books/{book_id}/glossary")
+async def admin_book_glossary(book_id: str, admin: str = Depends(require_admin)):
+    """某本书的自动术语表（管理台只读查看）。"""
+    row = await run_in_threadpool(
+        db.query_one, "SELECT terms_json, updated_at FROM book_glossaries WHERE book_id=%s", (book_id,))
+    terms: list = []
+    if row and row.get("terms_json"):
+        try:
+            parsed = json.loads(row["terms_json"])
+            if isinstance(parsed, list):
+                terms = parsed
+        except Exception:      # noqa: BLE001
+            terms = []
+    return {"book_id": book_id, "terms": terms, "updated_at": row["updated_at"] if row else None}
+
+
 @app.post("/v1/pages/translate", dependencies=[Depends(auth)])
 async def translate_page(
     request: Request,
@@ -1235,6 +1466,7 @@ async def translate_page(
     else:
         ctx_source = "none"
 
+    _apply_glossary(cfg, real_book_id)
     img_sha = sha1_bytes(raw)
     cfg_hash = result_cache_hash(cfg, include_background)
     cache_key = f"{owner}:{img_sha}:{cfg_hash}"   # 修复 04-M2：掺 owner 防跨账号缓存共享
@@ -1326,6 +1558,8 @@ async def _execute_translate(raw, cfg, owner, real_book_id, real_page_index, ord
             else:
                 cfg.pop("context_text", None)
                 ctx_source = "none"
+        # 术语表在锁内重取上下文后同样补挂（fresh_context 会覆盖请求时拼好的前缀）
+        _apply_glossary(cfg, real_book_id)
         # ---- L1 结果缓存（Redis 存 JSON，图片落磁盘）----
         if not force:
             cached_payload_json = await cache_get(redis_key)
@@ -1395,6 +1629,9 @@ async def _execute_translate(raw, cfg, owner, real_book_id, real_page_index, ord
                         await _redis.incr("mit:stats:pages_translated")
                     except Exception:
                         pass
+                # 术语表：每翻满 N 页触发一次后台提取（失败静默，绝不影响翻译链路）
+                if (real_page_index + 1) % GLOSSARY_EXTRACT_EVERY_PAGES == 0:
+                    _spawn_glossary_extract(owner, real_book_id, cfg)
             except Exception as e:      # noqa: BLE001
                 await run_in_threadpool(
                     _persist_page, real_book_id, owner, real_page_index, order_dir, title, img_sha, cfg_hash,
@@ -1574,6 +1811,7 @@ async def retranslate(page_id: int, body: Optional[dict] = None, owner: str = De
             book_context_from_db, row["book_id"], row["page_index"], S.CONTEXT_PAGES)
     if ctx_text:
         cfg["context_text"] = ctx_text
+    _apply_glossary(cfg, row["book_id"])
 
     async with get_book_lock(row["book_id"]), _engine_sem.acquire():
         if not body.get("context") and row["book_id"] and S.CONTEXT_PAGES > 0:
@@ -1583,6 +1821,7 @@ async def retranslate(page_id: int, body: Optional[dict] = None, owner: str = De
             cfg["context_text"] = ctx_text
         else:
             cfg.pop("context_text", None)
+        _apply_glossary(cfg, row["book_id"])
         data = await call_engine(raw, cfg)
         if _is_book_deleted(row["book_id"]):
             raise HTTPException(404, detail="book deleted")
@@ -1828,13 +2067,14 @@ async def _run_translate_all(job_id, owner, book_id, title, order_dir, cfg, indi
 
             # 顺序跑，前一页的 page_context 已落库，下一页自动带上跨页上下文
             ctx_source = "none"
-            cfg_page = cfg
+            cfg_page = dict(cfg)
             if S.CONTEXT_PAGES > 0:
                 ctx_text = await run_in_threadpool(book_context_from_db, book_id, idx, S.CONTEXT_PAGES)
                 if ctx_text:
                     cfg_page = dict(cfg)
                     cfg_page["context_text"] = ctx_text
                     ctx_source = "db"
+            _apply_glossary(cfg_page, book_id)
 
             # 修复 04-M5：连接类错误重试同页至多 2 次（5s/15s）；连续 3 页失败熔断中止整本
             page_ok = False
@@ -1981,13 +2221,14 @@ async def _run_translate_all_from_zip(job_id, owner, book_id, title, order_dir, 
                 await run_in_threadpool(_persist_page, book_id, owner, idx, order_dir, title, img_sha, cfg_hash, raw, None, None, "running", 0, None, 0, None)
 
                 ctx_source = "none"
-                cfg_page = cfg
+                cfg_page = dict(cfg)
                 if S.CONTEXT_PAGES > 0:
                     ctx_text = await run_in_threadpool(book_context_from_db, book_id, idx, S.CONTEXT_PAGES)
                     if ctx_text:
                         cfg_page = dict(cfg)
                         cfg_page["context_text"] = ctx_text
                         ctx_source = "db"
+                _apply_glossary(cfg_page, book_id)
                 # 修复 04-M5：连接类错误重试同页至多 2 次（5s/15s）；连续 3 页失败熔断中止整本
                 page_ok = False
                 for _retry in range(3):
@@ -2060,6 +2301,7 @@ async def translate_book_page(book_id: str, page_index: int, force: bool = Form(
             if ctx_text:
                 cfg["context_text"] = ctx_text
                 ctx_source = "db"
+        _apply_glossary(cfg, book_id)
 
         img_sha = sha1_bytes(raw)
         cfg_hash = pipeline_hash(cfg)

@@ -114,6 +114,20 @@ class TranslationApi {
         return this
     }
 
+    /** Crash 上报（POST /v1/crashes）。2xx 视为成功；未配置服务器地址直接 false。 */
+    suspend fun reportCrash(payload: String): Boolean =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            if (base.isBlank()) return@withContext false
+            runCatching {
+                val req = Request.Builder()
+                    .url("$base/v1/crashes")
+                    .authed()
+                    .post(payload.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
+                client.newCall(req).execute().use { it.isSuccessful }
+            }.getOrDefault(false)
+        }
+
     /** 上传一页翻译。async=true 立刻拿 jobId 去轮询；false 同步等结果（慢）。 */
     suspend fun translate(image: File, bookId: String, pageIndex: Int, async: Boolean, force: Boolean = false): TranslateResp =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {

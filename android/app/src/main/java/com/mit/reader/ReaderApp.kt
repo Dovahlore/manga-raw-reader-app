@@ -41,6 +41,7 @@ import com.mit.reader.data.PairedCredential
 import com.mit.reader.data.PairedDevice
 import com.mit.reader.data.RemotePairResult
 import com.mit.reader.data.ServerBook
+import com.mit.reader.data.CrashReporter
 import com.mit.reader.data.ServerConfig
 import com.mit.reader.data.TranslationApi
 import com.mit.reader.data.serverId
@@ -78,6 +79,7 @@ data class DownloadTask(
     val cookie: String? = null,
     val referer: String? = null,
     val userAgent: String? = null,
+    val mimeType: String? = null,
     val written: Long = 0L,
     val total: Long = 0L,
     val status: DownloadStatus = DownloadStatus.DOWNLOADING,
@@ -1007,10 +1009,17 @@ class ReaderApp : Application() {
     private val downloadPersistAt = ConcurrentHashMap<String, Long>()
     private val downloadsPrefKey = "downloads"
 
-    /** 加入后台下载：创建任务后立即开始。 */
-    fun enqueueDownload(url: String, name: String, cookie: String?, referer: String?, userAgent: String?) {
+    /** 加入后台下载：创建任务后立即开始。mimeType 来自 WebView 下载拦截（可能为 null）。 */
+    fun enqueueDownload(
+        url: String,
+        name: String,
+        cookie: String?,
+        referer: String?,
+        userAgent: String?,
+        mimeType: String? = null,
+    ) {
         val title = library.titleFromFileName(name)
-        val task = DownloadTask(UUID.randomUUID().toString(), url, name, title, cookie, referer, userAgent)
+        val task = DownloadTask(UUID.randomUUID().toString(), url, name, title, cookie, referer, userAgent, mimeType)
         downloadTasks.add(0, task)   // 新的在最上面
         downloadStops[task.id] = AtomicBoolean(false)
         persistDownloads()
@@ -1156,6 +1165,7 @@ class ReaderApp : Application() {
                     t.cookie?.let { put("cookie", it) }
                     t.referer?.let { put("referer", it) }
                     t.userAgent?.let { put("user_agent", it) }
+                    t.mimeType?.let { put("mime", it) }
                     put("total", t.total)
                     put("written", t.written)
                     put("status", t.status.name)
@@ -1183,6 +1193,7 @@ class ReaderApp : Application() {
                 cookie = o.optString("cookie").takeIf { it.isNotBlank() },
                 referer = o.optString("referer").takeIf { it.isNotBlank() },
                 userAgent = o.optString("user_agent").takeIf { it.isNotBlank() },
+                mimeType = o.optString("mime").takeIf { it.isNotBlank() },
                 written = o.optLong("written", 0),
                 total = o.optLong("total", 0),
                 status = if (status == DownloadStatus.DOWNLOADING) DownloadStatus.PAUSED else status,
@@ -1928,6 +1939,9 @@ class ReaderApp : Application() {
     override fun onCreate() {
         super.onCreate()
         ServerConfig.init(this)
+        // Crash 采集：先装处理器（此后任何线程崩溃都落盘）；本地暂存的崩溃在 IO 线程异步上报
+        CrashReporter.install(this)
+        appScope.launch(Dispatchers.IO) { runCatching { CrashReporter.uploadPending(this@ReaderApp) } }
         loadCloudSnapshot()
         library = LibraryRepository(this)
         currentLibraryStorageDir = libraryStorageOptions()
@@ -2483,12 +2497,24 @@ class ReaderApp : Application() {
             val msg = if (done >= book.pageCount) "《${book.title}》翻译完成"
             else "《${book.title}》翻译完成 $done/${book.pageCount} 页（失败页可在阅读器内重试）"
             Toast.makeText(this@ReaderApp, msg, Toast.LENGTH_LONG).show()
+            TranslationNotifier.notifyResult(
+                this@ReaderApp,
+                "《${book.title}》翻译完成",
+                msg,
+                book.id.hashCode(),
+            )
         } catch (e: CancellationException) {
             if (!stopRequested) throw e   // 应用退出（非用户停止）→ 重新抛出取消整个队列
         } catch (e: Exception) {
             if (isFatalTranslationError(e)) translateQueue.clear()
             if (!stopRequested) {
                 Toast.makeText(this@ReaderApp, "《${book.title}》翻译失败：${e.message}", Toast.LENGTH_LONG).show()
+                TranslationNotifier.notifyResult(
+                    this@ReaderApp,
+                    "《${book.title}》翻译失败",
+                    translationErrorMessage(e).take(200),
+                    book.id.hashCode(),
+                )
             }
         } finally {
             if (translateQueue.firstOrNull() == bookId) translateQueue.removeAt(0)
