@@ -8,6 +8,9 @@ on:
 jobs:
   push_to_registry:
     name: Push Docker image to Docker Hub
+    # 上游遗留：该 job 只属于 zyddnys/manga-image-translator（镜像名与 secrets 都是上游的）。
+    # fork 上无 Docker Hub 凭据，push 必然 unauthorized；加仓库守卫让本仓库发布时直接 skip。
+    if: github.repository == 'zyddnys/manga-image-translator'
     runs-on: ubuntu-latest
     steps:
       - name: Check out the repo
