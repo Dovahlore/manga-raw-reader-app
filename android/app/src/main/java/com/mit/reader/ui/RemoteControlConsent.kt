@@ -1,5 +1,6 @@
 package com.mit.reader.ui
 
+import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -8,12 +9,14 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -51,7 +54,9 @@ data class ConsentRequest(val controllerName: String, val at: Long)
  * - 遥控 = 单独的请求：已配对设备发起连接且会话持续存活（8 秒，用于区分配对瞬间的短暂连入）
  *   时，本机弹窗「是否接受遥控」；接受前翻页能力被压制，每次会话都要重新确认；
  * - 接受后持续被遥控，同时发系统通知「正在被 XXX 遥控」，会话结束自动撤除；
- *   被控端断开入口：设备页「断开」、阅读器底栏「退出被遥控」；拒绝后 60 秒内拦截同一设备重连。
+ *   被控端断开入口：设备页「断开」、阅读器底栏「退出被遥控」；拒绝后 60 秒内拦截同一设备重连；
+ * - 被控期间（确认弹窗待处理或已接受）屏幕保持常亮：远端翻页走网络命令、不产生本机触摸事件，
+ *   不会重置系统「无操作息屏」计时（2026-10-26）。
  */
 private const val CONTROL_CHANNEL_ID = "remote_control_session"
 private const val CONTROL_NOTIFY_ID = 4701
@@ -199,6 +204,23 @@ fun RemoteControlConsentHost(app: ReaderApp) {
     LaunchedEffect(app.readerScreenActive) {
         if (RemoteControlUi.acceptedControllerId != null && pending == null) {
             app.remoteControl.updateReaderInteractionAllowed(app.readerScreenActive)
+        }
+    }
+
+    // ---- 被控期间保持屏幕常亮（2026-10-26）----
+    // 遥控翻页等远端操作走网络命令，不产生本机触摸/按键事件，系统「无操作息屏」计时不会被打断，
+    // 被控阅读到一半屏幕就灭了。只要遥控会话存在（确认弹窗待处理或已接受被控），就给窗口挂
+    // FLAG_KEEP_SCREEN_ON；会话结束（断开/拒绝/静默超时）自动恢复系统息屏节奏。
+    // 用窗口级 flag 而非 view.keepScreenOn：遥控器页（RemoteControlScreen）在同一棵视图树上
+    // 开关 keepScreenOn，窗口 flag 与它互不覆盖（两种机制在窗口层取并集，不互相冲掉）。
+    val keepScreenAwake = pending != null || RemoteControlUi.acceptedControllerId != null
+    val hostActivity = context as? Activity
+    DisposableEffect(hostActivity, keepScreenAwake) {
+        if (keepScreenAwake) {
+            hostActivity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        onDispose {
+            hostActivity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
     }
 
