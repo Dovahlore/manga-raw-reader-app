@@ -80,6 +80,7 @@ MIT Reader 是 Manga Image Translator 的 Android 客户端，使用 Kotlin 与 
 - 仅阅读端停留在阅读器前台时接受翻页命令；
 - 遥控器页内音量上 / 下分别控制上一页 / 下一页；
 - 支持屏幕按钮翻页和连接状态显示。
+- 被控期间阅读端屏幕保持常亮：远端翻页不产生本机触摸事件、不会重置系统息屏计时，会话结束自动恢复。
 
 ### 存储与更新
 
@@ -118,9 +119,9 @@ Release 签名配置读取 `android/app/keystore.properties`：
 
 ```properties
 storeFile=../your-release-key.jks
-storePassword=your-store-password
+storePassword=YOUR_STORE_PASSWORD
 keyAlias=your-alias
-keyPassword=your-key-password
+keyPassword=YOUR_KEY_PASSWORD
 ```
 
 该文件与密钥不要提交到 Git。
