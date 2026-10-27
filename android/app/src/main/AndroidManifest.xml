@@ -99,6 +99,11 @@
             </intent-filter>
         </activity>
 
+        <!-- 下载通知上的操作按钮（暂停/继续/取消） -->
+        <receiver
+            android:name=".data.DownloadActionReceiver"
+            android:exported="false" />
+
         <!-- 自更新：用 FileProvider 暴露下载好的 APK 给系统安装器 -->
         <provider
             android:name="androidx.core.content.FileProvider"

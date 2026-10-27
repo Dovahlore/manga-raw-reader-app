@@ -41,6 +41,7 @@ import com.mit.reader.data.PairedCredential
 import com.mit.reader.data.PairedDevice
 import com.mit.reader.data.RemotePairResult
 import com.mit.reader.data.ServerBook
+import com.mit.reader.data.AppNotifier
 import com.mit.reader.data.CrashReporter
 import com.mit.reader.data.ServerConfig
 import com.mit.reader.data.TranslationApi
@@ -1063,16 +1064,20 @@ class ReaderApp : Application() {
         downloadTasks.removeAll { it.id == id }
         partFile(id).delete()
         persistDownloads()
+        AppNotifier.cancelDownload(this, id)
     }
 
     /** 清除已结束（完成/重复）的下载记录。 */
     fun clearFinishedDownloads() {
-        downloadTasks.removeAll { t ->
-            val finished = t.status == DownloadStatus.DONE ||
+        val removed = downloadTasks.filter { t ->
+            t.status == DownloadStatus.DONE ||
                 t.status == DownloadStatus.DUPLICATE || t.status == DownloadStatus.CANCELED
-            if (finished) downloadRetries.remove(t.id)
-            finished
         }
+        removed.forEach {
+            downloadRetries.remove(it.id)
+            AppNotifier.cancelDownload(this, it.id)
+        }
+        downloadTasks.removeAll(removed)
     }
 
     private fun partFile(id: String): File =
@@ -1085,6 +1090,7 @@ class ReaderApp : Application() {
                 val idx = downloadTasks.indexOfFirst { it.id == taskId }
                 if (idx < 0) return@launch
                 val task = downloadTasks[idx]
+                AppNotifier.notifyDownloadProgress(this@ReaderApp, task)
                 val part = partFile(taskId)
 
                 val existing = library.bookByTitle(task.title)
@@ -1119,6 +1125,9 @@ class ReaderApp : Application() {
                             appScope.launch {
                                 updateDownload(taskId) { it.copy(written = w, total = t) }
                                 persistDownloads()
+                                downloadTasks.firstOrNull { it.id == taskId }?.let {
+                                    AppNotifier.notifyDownloadProgress(this@ReaderApp, it)
+                                }
                             }
                         }
                     },
@@ -1127,6 +1136,9 @@ class ReaderApp : Application() {
                 // 下载完成：落盘到最终文件名 → 导入 → 删暂存（本协程在主线程，直接更新状态）
                 updateDownload(taskId) { it.copy(written = finalWritten, status = DownloadStatus.IMPORTING) }
                 persistDownloads()
+                downloadTasks.firstOrNull { it.id == taskId }?.let {
+                    AppNotifier.notifyDownloadProgress(this@ReaderApp, it)
+                }
                 val (finalFile, results) = storageGate.withLock {
                     val target = File(library.defaultBooksDir(), task.name)
                     if (target.exists()) target.delete()
@@ -1147,6 +1159,9 @@ class ReaderApp : Application() {
                 updateDownload(taskId) { it.copy(status = st, message = msg) }
                 downloadRetries.remove(taskId)   // 成功/重复都清掉重试计数
                 persistDownloads()
+                downloadTasks.firstOrNull { it.id == taskId }?.let {
+                    AppNotifier.notifyDownloadResult(this@ReaderApp, it, results.firstOrNull()?.book?.coverFile)
+                }
                 if (added.isNotEmpty()) {
                     added.forEach { upsertLibraryBook(it.book) }   // 新书入库：只插入这几项，不全量刷新
                     Toast.makeText(this@ReaderApp, msg, Toast.LENGTH_SHORT).show()
@@ -1163,6 +1178,9 @@ class ReaderApp : Application() {
                         it.copy(status = DownloadStatus.PAUSED, written = partFile(taskId).length(), message = "已暂停")
                     }
                     persistDownloads()
+                    downloadTasks.firstOrNull { it.id == taskId }?.let {
+                        AppNotifier.notifyDownloadProgress(this@ReaderApp, it)
+                    }
                 }
             } catch (e: Exception) {
                 // 断连/超时等失败：不干等用户点继续，自动按退避序列断点重试
@@ -1181,6 +1199,9 @@ class ReaderApp : Application() {
                             )
                         }
                         persistDownloads()
+                        downloadTasks.firstOrNull { it.id == taskId }?.let {
+                            AppNotifier.notifyDownloadProgress(this@ReaderApp, it)
+                        }
                         appScope.launch {
                             delay(backoff)
                             // 等待期间用户可能已取消/暂停/手动继续；确认任务还在且未被叫停才重试
@@ -1205,6 +1226,9 @@ class ReaderApp : Application() {
                             )
                         }
                         persistDownloads()
+                        downloadTasks.firstOrNull { it.id == taskId }?.let {
+                            AppNotifier.notifyDownloadFinalFail(this@ReaderApp, it)
+                        }
                     }
                 }
             } finally {
@@ -1266,6 +1290,14 @@ class ReaderApp : Application() {
                 status = if (status == DownloadStatus.DOWNLOADING) DownloadStatus.PAUSED else status,
                 message = if (status == DownloadStatus.DOWNLOADING) "上次未完成，可继续下载" else o.optString("message"),
             ))
+        }
+        // 恢复未完成下载的系统通知（暂停/失败任务可从通知直接继续/取消）
+        downloadTasks.forEach {
+            when (it.status) {
+                DownloadStatus.PAUSED -> AppNotifier.notifyDownloadProgress(this, it)
+                DownloadStatus.FAILED -> AppNotifier.notifyDownloadFinalFail(this, it)
+                else -> {}
+            }
         }
     }
 
@@ -2556,31 +2588,27 @@ class ReaderApp : Application() {
         }
         stopRequested = false
         translatingProgress = null   // 真实进度由 translateWholeBook 查完服务端后设置，不闪 0
+        AppNotifier.notifyTranslationProgress(this, book.id, book.title, 0, book.pageCount, book.coverFile)
         try {
             val done = translateWholeBook(book) { d, t ->
                 translatingProgress = d to t
                 progressHistory[book.id] = d to t
+                AppNotifier.notifyTranslationProgress(this@ReaderApp, book.id, book.title, d, t, book.coverFile)
             }
             val msg = if (done >= book.pageCount) "《${book.title}》翻译完成"
             else "《${book.title}》翻译完成 $done/${book.pageCount} 页（失败页可在阅读器内重试）"
             Toast.makeText(this@ReaderApp, msg, Toast.LENGTH_LONG).show()
-            TranslationNotifier.notifyResult(
-                this@ReaderApp,
-                "《${book.title}》翻译完成",
-                msg,
-                book.id.hashCode(),
-            )
+            AppNotifier.notifyTranslationResult(this, book.id, book.title, ok = true, message = msg, coverFile = book.coverFile)
         } catch (e: CancellationException) {
             if (!stopRequested) throw e   // 应用退出（非用户停止）→ 重新抛出取消整个队列
+            AppNotifier.cancelTranslation(this, book.id)   // 用户停止：撤掉进行中进度通知
         } catch (e: Exception) {
             if (isFatalTranslationError(e)) translateQueue.clear()
             if (!stopRequested) {
                 Toast.makeText(this@ReaderApp, "《${book.title}》翻译失败：${e.message}", Toast.LENGTH_LONG).show()
-                TranslationNotifier.notifyResult(
-                    this@ReaderApp,
-                    "《${book.title}》翻译失败",
-                    translationErrorMessage(e).take(200),
-                    book.id.hashCode(),
+                AppNotifier.notifyTranslationResult(
+                    this, book.id, book.title, ok = false,
+                    message = translationErrorMessage(e).take(200), coverFile = book.coverFile,
                 )
             }
         } finally {
