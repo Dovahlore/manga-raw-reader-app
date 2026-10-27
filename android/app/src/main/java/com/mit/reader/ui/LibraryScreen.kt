@@ -2329,6 +2329,10 @@ private fun ProgressList(
     val hasFinishedDownload = downloadTasks.any {
         it.status == DownloadStatus.DONE || it.status == DownloadStatus.DUPLICATE
     }
+    val hasPausableDownload = downloadTasks.any { it.status == DownloadStatus.DOWNLOADING }
+    val hasResumableDownload = downloadTasks.any {
+        it.status == DownloadStatus.PAUSED || it.status == DownloadStatus.FAILED
+    }
 
     // 已同步书的服务端 book_id 是 cloudId（serverId），未同步是本地 id
     val serverMap = serverBooks.associateBy { it.id }
@@ -2368,8 +2372,12 @@ private fun ProgressList(
                     count = downloadTasks.size,
                     expanded = downloadsExpanded,
                     hasFinished = hasFinishedDownload,
+                    hasPausable = hasPausableDownload,
+                    hasResumable = hasResumableDownload,
                     onToggle = { downloadsExpanded = !downloadsExpanded },
                     onClear = { app.clearFinishedDownloads() },
+                    onPauseAll = { app.pauseAllDownloads() },
+                    onResumeAll = { app.resumeAllDownloads() },
                 )
             }
             if (downloadsExpanded) {
@@ -2475,8 +2483,12 @@ private fun DownloadSectionHeader(
     count: Int,
     expanded: Boolean,
     hasFinished: Boolean,
+    hasPausable: Boolean,
+    hasResumable: Boolean,
     onToggle: () -> Unit,
     onClear: () -> Unit,
+    onPauseAll: () -> Unit,
+    onResumeAll: () -> Unit,
 ) {
     Surface(
         onClick = onToggle,
@@ -2484,19 +2496,34 @@ private fun DownloadSectionHeader(
         color = MaterialTheme.colorScheme.surfaceVariant,
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("下载 · $count", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-            if (hasFinished) {
-                TextButton(onClick = onClear) { Text("清除已完成") }
+        Column {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("下载 · $count", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                Text(
+                    if (expanded) "收起 ▲" else "展开 ▼",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
             }
-            Text(
-                if (expanded) "收起 ▲" else "展开 ▼",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary,
-            )
+            if (hasPausable || hasResumable || hasFinished) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    if (hasPausable) {
+                        TextButton(onClick = onPauseAll) { Text("全部暂停") }
+                    }
+                    if (hasResumable) {
+                        TextButton(onClick = onResumeAll) { Text("全部继续") }
+                    }
+                    if (hasFinished) {
+                        TextButton(onClick = onClear) { Text("清除已完成") }
+                    }
+                }
+            }
         }
     }
 }

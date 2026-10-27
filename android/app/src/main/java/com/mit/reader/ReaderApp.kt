@@ -1008,6 +1008,13 @@ class ReaderApp : Application() {
     private val downloadStops = ConcurrentHashMap<String, AtomicBoolean>()
     private val downloadPersistAt = ConcurrentHashMap<String, Long>()
     private val downloadsPrefKey = "downloads"
+    /** 正在跑的下载协程（防手动继续与自动重试叠加双跑）。 */
+    private val runningDownloads = ConcurrentHashMap.newKeySet<String>()
+    /** 每个任务的自动重试次数（手动继续即清零；仅内存，进程重启后重新计）。 */
+    private val downloadRetries = ConcurrentHashMap<String, Int>()
+    /** 断连自动重试的退避序列（毫秒），次数上限 = 序列长度。 */
+    private val DOWNLOAD_RETRY_BACKOFF_MS =
+        longArrayOf(5_000L, 15_000L, 30_000L, 60_000L, 120_000L, 180_000L, 300_000L, 300_000L)
 
     /** 加入后台下载：创建任务后立即开始。mimeType 来自 WebView 下载拦截（可能为 null）。 */
     fun enqueueDownload(
@@ -1032,14 +1039,27 @@ class ReaderApp : Application() {
     }
 
     fun resumeDownload(id: String) {
+        downloadRetries.remove(id)   // 手动继续 = 重置自动重试计数
         downloadStops.remove(id)
         updateDownload(id) { it.copy(status = DownloadStatus.DOWNLOADING, message = "") }
         persistDownloads()
         runDownload(id)
     }
 
+    /** 全部暂停：暂停所有进行中的下载（导入中/已完成的任务不受影响）。 */
+    fun pauseAllDownloads() {
+        downloadTasks.filter { it.status == DownloadStatus.DOWNLOADING }.forEach { pauseDownload(it.id) }
+    }
+
+    /** 全部继续：恢复所有暂停/失败的下载（断点续传，重试计数重置）。 */
+    fun resumeAllDownloads() {
+        downloadTasks.filter { it.status == DownloadStatus.PAUSED || it.status == DownloadStatus.FAILED }
+            .forEach { resumeDownload(it.id) }
+    }
+
     fun cancelDownload(id: String) {
         downloadStops.getOrPut(id) { AtomicBoolean(false) }.set(true)
+        downloadRetries.remove(id)
         downloadTasks.removeAll { it.id == id }
         partFile(id).delete()
         persistDownloads()
@@ -1047,13 +1067,19 @@ class ReaderApp : Application() {
 
     /** 清除已结束（完成/重复）的下载记录。 */
     fun clearFinishedDownloads() {
-        downloadTasks.removeAll { it.status == DownloadStatus.DONE || it.status == DownloadStatus.DUPLICATE || it.status == DownloadStatus.CANCELED }
+        downloadTasks.removeAll { t ->
+            val finished = t.status == DownloadStatus.DONE ||
+                t.status == DownloadStatus.DUPLICATE || t.status == DownloadStatus.CANCELED
+            if (finished) downloadRetries.remove(t.id)
+            finished
+        }
     }
 
     private fun partFile(id: String): File =
         File(File(getExternalFilesDir(null), "downloads").apply { mkdirs() }, "$id.part")
 
     private fun runDownload(taskId: String) {
+        if (!runningDownloads.add(taskId)) return   // 同一任务同时只允许一个下载协程（手动继续×自动重试）
         appScope.launch {
             try {
                 val idx = downloadTasks.indexOfFirst { it.id == taskId }
@@ -1063,6 +1089,7 @@ class ReaderApp : Application() {
 
                 val existing = library.bookByTitle(task.title)
                 if (existing != null) {
+                    downloadRetries.remove(taskId)
                     part.delete()
                     updateDownload(taskId) {
                         it.copy(status = DownloadStatus.DUPLICATE, message = "本地已有《${existing.title}》")
@@ -1118,6 +1145,7 @@ class ReaderApp : Application() {
                     else -> DownloadStatus.DONE to "合集拆分：已导入 ${added.size} 本"
                 }
                 updateDownload(taskId) { it.copy(status = st, message = msg) }
+                downloadRetries.remove(taskId)   // 成功/重复都清掉重试计数
                 persistDownloads()
                 if (added.isNotEmpty()) {
                     added.forEach { upsertLibraryBook(it.book) }   // 新书入库：只插入这几项，不全量刷新
@@ -1137,13 +1165,52 @@ class ReaderApp : Application() {
                     persistDownloads()
                 }
             } catch (e: Exception) {
+                // 断连/超时等失败：不干等用户点继续，自动按退避序列断点重试
                 if (downloadTasks.any { it.id == taskId }) {
-                    updateDownload(taskId) { it.copy(status = DownloadStatus.FAILED, message = e.message ?: "下载失败") }
-                    persistDownloads()
+                    val partNow = partFile(taskId)
+                    val attempt = (downloadRetries[taskId] ?: 0) + 1
+                    if (attempt <= DOWNLOAD_RETRY_BACKOFF_MS.size) {
+                        downloadRetries[taskId] = attempt
+                        val backoff = DOWNLOAD_RETRY_BACKOFF_MS[attempt - 1]
+                        // 206 续传会先把 .part 截到 resumeFrom 再追加，取实际落盘大小作恢复点
+                        updateDownload(taskId) {
+                            it.copy(
+                                status = DownloadStatus.FAILED,
+                                written = partNow.length(),
+                                message = "连接中断，${backoff / 1000} 秒后自动重试（$attempt/${DOWNLOAD_RETRY_BACKOFF_MS.size}）：${(e.message ?: "下载失败").take(80)}",
+                            )
+                        }
+                        persistDownloads()
+                        appScope.launch {
+                            delay(backoff)
+                            // 等待期间用户可能已取消/暂停/手动继续；确认任务还在且未被叫停才重试
+                            if (downloadTasks.any { it.id == taskId } && downloadStops[taskId]?.get() != true) {
+                                updateDownload(taskId) {
+                                    it.copy(status = DownloadStatus.DOWNLOADING, message = "自动重试（$attempt/${DOWNLOAD_RETRY_BACKOFF_MS.size}）")
+                                }
+                                persistDownloads()
+                                // runningDownloads 防双跑：用户已手动续传在跑时这里直接返回
+                                runDownload(taskId)
+                            } else {
+                                downloadRetries.remove(taskId)
+                            }
+                        }
+                    } else {
+                        downloadRetries.remove(taskId)
+                        updateDownload(taskId) {
+                            it.copy(
+                                status = DownloadStatus.FAILED,
+                                written = partNow.length(),
+                                message = "自动重试 ${DOWNLOAD_RETRY_BACKOFF_MS.size} 次仍失败，可手动继续：${(e.message ?: "下载失败").take(80)}",
+                            )
+                        }
+                        persistDownloads()
+                    }
                 }
             } finally {
                 downloadStops.remove(taskId)
                 downloadPersistAt.remove(taskId)
+                runningDownloads.remove(taskId)
             }
         }
     }
