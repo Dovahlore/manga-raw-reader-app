@@ -247,7 +247,6 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
     // UI 自动隐藏：显示后 3 秒无操作自动隐藏；点空白区域切换显隐
     var uiVisible by remember { mutableStateOf(true) }
     var uiTick by remember { mutableIntStateOf(0) }
-    var remoteDialogOpen by remember { mutableStateOf(false) }
     var bottomMenuHeight by remember { mutableStateOf(72.dp) }
     val density = LocalDensity.current
     fun keepUiAlive() { uiTick++ }
@@ -330,8 +329,8 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                     style = MaterialTheme.typography.labelMedium,
                 )
                 Spacer(Modifier.weight(1f))
-                TextButton(onClick = { keepUiAlive(); remoteDialogOpen = true }) {
-                    Text("遥控", color = Color.White, style = MaterialTheme.typography.labelMedium)
+                TextButton(onClick = { keepUiAlive(); exportDialogOpen = true }) {
+                    Text("导出", color = Color.White, style = MaterialTheme.typography.labelMedium)
                 }
                 TextButton(
                     onClick = {
@@ -346,9 +345,6 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
                         color = Color.White,
                         style = MaterialTheme.typography.labelMedium,
                     )
-                }
-                TextButton(onClick = { keepUiAlive(); exportDialogOpen = true }) {
-                    Text("导出", color = Color.White, style = MaterialTheme.typography.labelMedium)
                 }
             }
 
@@ -481,7 +477,7 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
         }
     }
 
-    // 单页导出弹窗：译文未完成时禁用译文项
+    // 单页导出弹窗：有译文才可导译文（无译文置灰）；原图导出永远可用
     if (exportDialogOpen) {
         val hasTranslation = vm.pageStates[vm.currentPage]?.translatedFile
             ?.let { it.exists() && it.length() > 0L } == true
@@ -516,39 +512,6 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit) {
         )
     }
 
-    if (remoteDialogOpen) {
-        AlertDialog(
-            onDismissRequest = { remoteDialogOpen = false },
-            title = { Text("遥控器模式") },
-            text = {
-                Column(verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp)) {
-                app.localTransferEndpoint()?.let {
-                    Text("地址：$it", style = MaterialTheme.typography.bodyMedium)
-                }
-                Text(
-                    "配对与配对码在「书库 · 设备」页；遥控请求到达时本机会弹窗确认，接受后才会被遥控。",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                    app.remoteControl.connectedControllerName?.let {
-                        Text("已连接：$it", style = MaterialTheme.typography.bodyMedium)
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { remoteDialogOpen = false }) { Text("关闭") }
-            },
-            dismissButton = app.remoteControl.connectedControllerName?.let {
-                {
-                    TextButton(
-                        onClick = {
-                            app.disconnectRemoteHostController()
-                            remoteDialogOpen = false
-                        },
-                    ) { Text("断开") }
-                }
-            },
-        )
-    }
 }
 
 /**
